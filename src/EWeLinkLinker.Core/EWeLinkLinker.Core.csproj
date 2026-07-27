@@ -1,0 +1,19 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- 抑制 Windows 专属 API 警告：本项目仅在 Windows 上运行（由 Service/ConfigApp 引用） -->
+    <NoWarn>CA1416</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="LibreHardwareMonitorLib" Version="0.9.4" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.10" />
+    <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.21.0" />
+    <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="10.0.10" />
+    <PackageReference Include="System.Management" Version="10.0.10" />
+  </ItemGroup>
+
+</Project>

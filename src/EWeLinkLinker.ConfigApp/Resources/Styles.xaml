@@ -1,0 +1,133 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- 颜色资源 -->
+    <SolidColorBrush x:Key="PrimaryBrush" Color="#2196F3"/>
+    <SolidColorBrush x:Key="PrimaryDarkBrush" Color="#1976D2"/>
+    <SolidColorBrush x:Key="SuccessBrush" Color="#4CAF50"/>
+    <SolidColorBrush x:Key="WarningBrush" Color="#FF9800"/>
+    <SolidColorBrush x:Key="DangerBrush" Color="#F44336"/>
+    <SolidColorBrush x:Key="BackgroundBrush" Color="#F5F5F5"/>
+    <SolidColorBrush x:Key="CardBrush" Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="TextPrimaryBrush" Color="#212121"/>
+    <SolidColorBrush x:Key="TextSecondaryBrush" Color="#757575"/>
+    <SolidColorBrush x:Key="DividerBrush" Color="#E0E0E0"/>
+
+    <!-- 顶部状态栏按钮样式 -->
+    <Style x:Key="StatusBarButton" TargetType="Button">
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="Foreground" Value="White"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="Padding" Value="12,6"/>
+        <Setter Property="Margin" Value="4,0"/>
+        <Setter Property="FontSize" Value="13"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="border"
+                            Background="{TemplateBinding Background}"
+                            CornerRadius="4"
+                            Padding="{TemplateBinding Padding}">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="border" Property="Background" Value="#ffffff20"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- 工具栏按钮样式 -->
+    <Style x:Key="ToolBarButton" TargetType="Button">
+        <Setter Property="Background" Value="{StaticResource PrimaryBrush}"/>
+        <Setter Property="Foreground" Value="White"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="Padding" Value="16,10"/>
+        <Setter Property="Margin" Value="6,0"/>
+        <Setter Property="FontSize" Value="13"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="border"
+                            Background="{TemplateBinding Background}"
+                            CornerRadius="6"
+                            Padding="{TemplateBinding Padding}">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="border" Property="Background" Value="{StaticResource PrimaryDarkBrush}"/>
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="border" Property="Opacity" Value="0.5"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- 设备卡片样式 -->
+    <Style x:Key="DeviceCard" TargetType="Border">
+        <Setter Property="Background" Value="{StaticResource CardBrush}"/>
+        <Setter Property="CornerRadius" Value="8"/>
+        <Setter Property="Padding" Value="16"/>
+        <Setter Property="Margin" Value="8"/>
+        <Setter Property="MinWidth" Value="220"/>
+        <Setter Property="MaxWidth" Value="280"/>
+        <Setter Property="Effect">
+            <Setter.Value>
+                <DropShadowEffect ShadowDepth="2" BlurRadius="8" Opacity="0.1" Color="#000000"/>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- 通道开关样式 -->
+    <Style x:Key="ChannelToggle" TargetType="ToggleButton">
+        <Setter Property="Width" Value="48"/>
+        <Setter Property="Height" Value="28"/>
+        <Setter Property="Margin" Value="2"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ToggleButton">
+                    <Grid>
+                        <Border x:Name="track"
+                                CornerRadius="14"
+                                Background="#E0E0E0"
+                                Width="48" Height="28"/>
+                        <Ellipse x:Name="thumb"
+                                 Fill="White"
+                                 Width="20" Height="20"
+                                 HorizontalAlignment="Left"
+                                 Margin="4,0"/>
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="track" Property="Background" Value="{StaticResource SuccessBrush}"/>
+                            <Setter TargetName="thumb" Property="HorizontalAlignment" Value="Right"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- 规则复选框样式 -->
+    <Style x:Key="RuleCheckBox" TargetType="CheckBox">
+        <Setter Property="Margin" Value="8,4"/>
+        <Setter Property="FontSize" Value="12"/>
+        <Setter Property="Foreground" Value="{StaticResource TextSecondaryBrush}"/>
+    </Style>
+
+    <!-- 状态指示灯样式 -->
+    <Style x:Key="StatusIndicator" TargetType="Ellipse">
+        <Setter Property="Width" Value="10"/>
+        <Setter Property="Height" Value="10"/>
+    </Style>
+
+</ResourceDictionary>

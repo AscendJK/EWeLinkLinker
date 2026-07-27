@@ -1,0 +1,9 @@
+<UserControl x:Class="EWeLinkLinker.ConfigApp.TimePicker"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+        <ComboBox x:Name="HoursCombo" Width="45" FontSize="11" SelectedIndex="8"/>
+        <TextBlock Text=":" VerticalAlignment="Center" Margin="2,0"/>
+        <ComboBox x:Name="MinutesCombo" Width="45" FontSize="11" SelectedIndex="0"/>
+    </StackPanel>
+</UserControl>

@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/EWeLinkLinker.ConfigApp/EWeLinkLinker.ConfigApp.csproj" />
+    <Project Path="src/EWeLinkLinker.Core/EWeLinkLinker.Core.csproj" />
+    <Project Path="src/EWeLinkLinker.Service/EWeLinkLinker.Service.csproj" />
+  </Folder>
+</Solution>

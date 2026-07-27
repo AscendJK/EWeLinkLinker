@@ -1,0 +1,20 @@
+{
+  "rules": [
+    {
+      "event": "boot",
+      "actions": []
+    },
+    {
+      "event": "shutdown",
+      "actions": []
+    },
+    {
+      "event": "sleep",
+      "actions": []
+    },
+    {
+      "event": "wake",
+      "actions": []
+    }
+  ]
+}

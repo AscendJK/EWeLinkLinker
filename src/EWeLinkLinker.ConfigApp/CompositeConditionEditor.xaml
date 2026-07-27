@@ -1,0 +1,64 @@
+<UserControl x:Class="EWeLinkLinker.ConfigApp.CompositeConditionEditor"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:EWeLinkLinker.ConfigApp">
+    <Border Background="#F8F9FA" CornerRadius="8" Padding="12" BorderBrush="#E9ECEF" BorderThickness="1">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+
+            <!-- 逻辑运算符选择 -->
+            <DockPanel Grid.Row="0" Margin="0,0,0,8">
+                <TextBlock Text="逻辑关系:" VerticalAlignment="Center" Margin="0,0,8,0" FontSize="12"/>
+                <ComboBox x:Name="LogicComboBox" Width="80" FontSize="11" SelectedIndex="0"
+                          SelectionChanged="LogicComboBox_SelectionChanged">
+                    <ComboBoxItem Content="全部满足 (AND)" Tag="And"/>
+                    <ComboBoxItem Content="任一满足 (OR)" Tag="Or"/>
+                </ComboBox>
+            </DockPanel>
+
+            <!-- 子条件列表 -->
+            <ItemsControl Grid.Row="2" x:Name="SubConditionsItemsControl">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Border Background="White" CornerRadius="6" Padding="8" Margin="0,4">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="28"/>
+                                </Grid.ColumnDefinitions>
+
+                                <!-- 子条件类型 -->
+                                <ComboBox Grid.Column="0" Width="90" FontSize="11" Margin="0,0,4,0"
+                                          x:Name="SubTypeComboBox" Tag="{Binding}"
+                                          SelectionChanged="SubTypeComboBox_SelectionChanged">
+                                    <ComboBoxItem Content="时间" Tag="time"/>
+                                    <ComboBoxItem Content="间隔" Tag="interval"/>
+                                    <ComboBoxItem Content="CPU温度" Tag="cpu_temp"/>
+                                    <ComboBoxItem Content="CPU使用率" Tag="cpu_usage"/>
+                                    <ComboBoxItem Content="应用启动" Tag="app_start"/>
+                                    <ComboBoxItem Content="应用关闭" Tag="app_close"/>
+                                </ComboBox>
+
+                                <!-- 子条件值 -->
+                                <ContentControl Grid.Column="1" x:Name="SubValueControl" Tag="{Binding}"/>
+
+                                <!-- 删除按钮 -->
+                                <Button Grid.Column="2" Content="✕" Width="24" Height="24" FontSize="10"
+                                        Click="RemoveSubCondition_Click" Tag="{Binding}" ToolTip="删除此条件"/>
+                            </Grid>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <!-- 添加子条件按钮 -->
+            <Button Grid.Row="1" Content="+ 添加子条件" Style="{StaticResource GhostButton}" FontSize="11"
+                    HorizontalAlignment="Left" Margin="0,4,0,0" Click="AddSubCondition_Click"/>
+        </Grid>
+    </Border>
+</UserControl>

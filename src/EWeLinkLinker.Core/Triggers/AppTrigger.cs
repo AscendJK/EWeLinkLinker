@@ -1,0 +1,262 @@
+using System.Diagnostics;
+using EWeLinkLinker.Core.Logging;
+
+namespace EWeLinkLinker.Core.Triggers;
+
+/// <summary>
+/// 应用启动触发器（优化版 - 无独立定时器）
+/// 参数格式: 进程名（不含.exe），如 "notepad", "chrome", "palworld"
+/// </summary>
+[Trigger("app_start", "应用启动", "指定应用启动时触发")]
+public class AppStartTrigger : OptimizedTriggerBase
+{
+    private readonly string _processName;
+    private readonly HashSet<int> _knownProcesses = new();
+
+    public override string Type => "app_start";
+    public override string DisplayName => "应用启动";
+
+    protected override TimeSpan PollingInterval => TimeSpan.FromSeconds(3);
+
+    public AppStartTrigger(TriggerConfig config) : base()
+    {
+        if (!ValidateParameter(config.Parameter, out var error))
+            throw new ArgumentException(error);
+
+        // 提取纯进程名（去除版本号、 trainer 等）
+        _processName = ExtractProcessName(config.Parameter!);
+    }
+
+    public override bool ValidateParameter(string parameter, out string? errorMessage)
+    {
+        if (string.IsNullOrEmpty(parameter))
+        {
+            errorMessage = "进程名不能为空";
+            return false;
+        }
+        if (parameter.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+        {
+            errorMessage = "进程名包含非法字符";
+            return false;
+        }
+        errorMessage = null;
+        return true;
+    }
+
+    protected override void OnStart()
+    {
+        lock (_knownProcesses)
+        {
+            _knownProcesses.Clear();
+            var existing = FindMatchingProcesses(_processName);
+            foreach (var p in existing)
+            {
+                try { _knownProcesses.Add(p.Id); } catch { }
+            }
+        }
+    }
+
+    protected override ValueTask<bool> EvaluateCoreAsync(CancellationToken ct)
+    {
+        lock (_knownProcesses)
+        {
+            var current = FindMatchingProcesses(_processName);
+
+            foreach (var p in current)
+            {
+                try
+                {
+                    if (!_knownProcesses.Contains(p.Id))
+                    {
+                        _knownProcesses.Add(p.Id);
+                        return ValueTask.FromResult(true);
+                    }
+                }
+                catch { }
+            }
+
+            // 清理已退出的进程
+            _knownProcesses.RemoveWhere(id => current.All(p => p.Id != id));
+        }
+
+        return ValueTask.FromResult(false);
+    }
+
+    /// <summary>
+    /// 智能匹配进程 - 支持多种匹配方式（公共静态，供其他触发器使用）
+    /// 注意：返回的 Process 对象需要调用者释放
+    /// </summary>
+    public static List<Process> FindMatchingProcesses(string config)
+    {
+        var allProcesses = Process.GetProcesses();
+        var matches = new List<Process>();
+        try
+        {
+            // 方式1: 精确匹配进程名（不含.exe）
+            var cleanName = config.ToLower().Replace(".exe", "").Trim();
+            foreach (var p in allProcesses)
+            {
+                if (p.ProcessName.Equals(cleanName, StringComparison.OrdinalIgnoreCase))
+                    matches.Add(p);
+            }
+
+            if (matches.Count > 0) return matches.Distinct().ToList();
+
+            // 方式2: 尝试第一个单词（"Palworld v1.0" -> "palworld"）
+            var firstWord = cleanName.Split(new[] { ' ', '\t', '-', '_' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+            if (!string.IsNullOrEmpty(firstWord) && firstWord != cleanName)
+            {
+                foreach (var p in allProcesses)
+                {
+                    if (p.ProcessName.Equals(firstWord, StringComparison.OrdinalIgnoreCase))
+                        matches.Add(p);
+                }
+            }
+
+            if (matches.Count > 0) return matches.Distinct().ToList();
+
+            // 方式3: 包含匹配（进程名包含配置字符串）
+            foreach (var p in allProcesses)
+            {
+                if (p.ProcessName.Contains(cleanName, StringComparison.OrdinalIgnoreCase) ||
+                    cleanName.Contains(p.ProcessName, StringComparison.OrdinalIgnoreCase))
+                    matches.Add(p);
+            }
+
+            if (matches.Count > 0) return matches.Distinct().ToList();
+
+            // 方式4: 尝试匹配 MainWindowTitle（窗口标题）
+            foreach (var p in allProcesses)
+            {
+                if (!string.IsNullOrEmpty(p.MainWindowTitle) &&
+                    p.MainWindowTitle.Contains(config, StringComparison.OrdinalIgnoreCase))
+                    matches.Add(p);
+            }
+
+            return matches.Distinct().ToList();
+        }
+        finally
+        {
+            // 释放不需要的 Process 句柄，只保留匹配的
+            var matchedIds = new HashSet<int>(matches.Select(m => m.Id));
+            foreach (var p in allProcesses)
+            {
+                if (!matchedIds.Contains(p.Id))
+                    p.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
+    /// 从配置中提取纯进程名（保持向后兼容）
+    /// </summary>
+    public static string ExtractProcessName(string config)
+    {
+        if (string.IsNullOrEmpty(config)) return "";
+
+        // 如果是可执行文件路径，提取文件名
+        if (config.Contains('\\') || config.Contains('/'))
+        {
+            return Path.GetFileNameWithoutExtension(config).ToLower();
+        }
+
+        // 如果是带空格的名称，尝试提取第一个单词作为进程名
+        var parts = config.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length > 0)
+        {
+            return parts[0].ToLower();
+        }
+
+        return config.ToLower().Replace(".exe", "");
+    }
+}
+
+/// <summary>
+/// 应用关闭触发器（优化版 - 无独立定时器）
+/// 参数格式: 进程名（不含.exe）
+/// </summary>
+[Trigger("app_close", "应用关闭", "指定应用关闭时触发")]
+public class AppCloseTrigger : OptimizedTriggerBase
+{
+    private readonly string _processName;
+    private readonly HashSet<int> _trackedProcesses = new();
+
+    public override string Type => "app_close";
+    public override string DisplayName => "应用关闭";
+
+    protected override TimeSpan PollingInterval => TimeSpan.FromSeconds(3);
+
+    public AppCloseTrigger(TriggerConfig config) : base()
+    {
+        if (!ValidateParameter(config.Parameter, out var error))
+            throw new ArgumentException(error);
+
+        // 提取纯进程名
+        _processName = AppStartTrigger.ExtractProcessName(config.Parameter!);
+    }
+
+    public override bool ValidateParameter(string parameter, out string? errorMessage)
+    {
+        if (string.IsNullOrEmpty(parameter))
+        {
+            errorMessage = "进程名不能为空";
+            return false;
+        }
+        if (parameter.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+        {
+            errorMessage = "进程名包含非法字符";
+            return false;
+        }
+        errorMessage = null;
+        return true;
+    }
+
+    protected override void OnStart()
+    {
+        lock (_trackedProcesses)
+        {
+            _trackedProcesses.Clear();
+            var existing = AppStartTrigger.FindMatchingProcesses(_processName);
+            foreach (var p in existing)
+            {
+                try { _trackedProcesses.Add(p.Id); } catch { }
+            }
+        }
+    }
+
+    protected override ValueTask<bool> EvaluateCoreAsync(CancellationToken ct)
+    {
+        lock (_trackedProcesses)
+        {
+            // 使用智能匹配
+            var current = AppStartTrigger.FindMatchingProcesses(_processName);
+            var currentIds = new HashSet<int>();
+
+            foreach (var p in current)
+            {
+                try { currentIds.Add(p.Id); } catch { }
+            }
+
+            // 检查哪些进程已退出
+            var exited = _trackedProcesses.Where(id => !currentIds.Contains(id)).ToList();
+            if (exited.Count > 0)
+            {
+                // 更新跟踪列表
+                _trackedProcesses.RemoveWhere(id => !currentIds.Contains(id));
+                foreach (var id in currentIds)
+                {
+                    _trackedProcesses.Add(id);
+                }
+                return ValueTask.FromResult(true);
+            }
+
+            // 更新跟踪列表
+            foreach (var id in currentIds)
+            {
+                _trackedProcesses.Add(id);
+            }
+        }
+
+        return ValueTask.FromResult(false);
+    }
+}

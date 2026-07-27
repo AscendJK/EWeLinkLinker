@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\EWeLinkLinker.Core\EWeLinkLinker.Core.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <!-- Copy scripts to publish output -->
+  <ItemGroup>
+    <None Include="..\..\install.ps1" Link="install.ps1" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\uninstall.ps1" Link="uninstall.ps1" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

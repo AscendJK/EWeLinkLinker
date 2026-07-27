@@ -1,0 +1,31 @@
+<UserControl x:Class="EWeLinkLinker.ConfigApp.ActionRowControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Name="Root">
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="55"/>
+            <ColumnDefinition Width="50"/>
+            <ColumnDefinition Width="28"/>
+        </Grid.ColumnDefinitions>
+
+        <ComboBox x:Name="DeviceCombo" Grid.Column="0" Margin="0,0,4,0" FontSize="11"
+                  DisplayMemberPath="Name" SelectedValuePath="DeviceId"/>
+
+        <ComboBox x:Name="OutletCombo" Grid.Column="1" SelectedIndex="0" Margin="0,0,4,0" FontSize="11">
+            <ComboBoxItem Content="CH0"/>
+            <ComboBoxItem Content="CH1"/>
+            <ComboBoxItem Content="CH2"/>
+            <ComboBoxItem Content="CH3"/>
+        </ComboBox>
+
+        <ComboBox x:Name="StateCombo" Grid.Column="2" SelectedIndex="0" Margin="0,0,4,0" FontSize="11">
+            <ComboBoxItem Content="开"/>
+            <ComboBoxItem Content="关"/>
+        </ComboBox>
+
+        <Button Grid.Column="3" Content="✕" Width="24" Height="24" FontSize="12"
+                Click="Delete_Click" ToolTip="删除"/>
+    </Grid>
+</UserControl>
