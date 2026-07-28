@@ -16,6 +16,7 @@ public class GpuTempTrigger : OptimizedTriggerBase
     private readonly string _parameter2;
     private readonly ComparisonOperator _comparison;
     private bool _wasTriggered;
+    private bool _gpuInitialized;  // 防止重复初始化
     private IHardware? _gpuHardware;
     private Computer? _computer;
 
@@ -64,26 +65,38 @@ public class GpuTempTrigger : OptimizedTriggerBase
 
     private void InitializeGpu()
     {
-        if (_gpuHardware != null) return;
+        if (_gpuInitialized) return;  // 只初始化一次
+        _gpuInitialized = true;
 
-        _computer = new Computer { IsGpuEnabled = true };
-        _computer.Open();
-
-        foreach (var hardware in _computer.Hardware)
+        try
         {
-            if (hardware.HardwareType == HardwareType.GpuNvidia
-                || hardware.HardwareType == HardwareType.GpuAmd
-                || hardware.HardwareType == HardwareType.GpuIntel)
+            _computer = new Computer { IsGpuEnabled = true };
+            _computer.Open();
+
+            foreach (var hardware in _computer.Hardware)
             {
-                _gpuHardware = hardware;
-                Log(TraceLevel.Info, $"检测到 GPU: {hardware.Name}");
-                break;
+                if (hardware.HardwareType == HardwareType.GpuNvidia
+                    || hardware.HardwareType == HardwareType.GpuAmd
+                    || hardware.HardwareType == HardwareType.GpuIntel)
+                {
+                    _gpuHardware = hardware;
+                    Log(TraceLevel.Info, $"检测到 GPU: {hardware.Name}");
+                    break;
+                }
+            }
+
+            if (_gpuHardware == null)
+            {
+                Log(TraceLevel.Warning, "未检测到支持的 GPU");
             }
         }
-
-        if (_gpuHardware == null)
+        catch (Exception ex)
         {
-            Log(TraceLevel.Warning, "未检测到支持的 GPU");
+            // H-8 修复：初始化失败时重置标志，下次 Start 可重试
+            Log(TraceLevel.Warning, $"GPU 初始化异常: {ex.Message}");
+            _gpuInitialized = false;
+            _computer?.Close();
+            _computer = null;
         }
     }
 

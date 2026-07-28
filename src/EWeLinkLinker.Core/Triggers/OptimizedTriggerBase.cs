@@ -10,6 +10,7 @@ public abstract class OptimizedTriggerBase : ITrigger
 {
     private TriggerState _state = TriggerState.Idle;
     private bool _disposed;
+    private CancellationTokenSource? _resetCts;
 
     /// <summary>
     /// 验证参数是否有效
@@ -66,6 +67,12 @@ public abstract class OptimizedTriggerBase : ITrigger
     {
         if (_disposed) return false;
 
+        // H-12 修复：Error 状态下允许重试，不永久卡死
+        if (State == TriggerState.Error)
+        {
+            State = TriggerState.Monitoring;
+        }
+
         try
         {
             var wasMonitoring = State == TriggerState.Monitoring;
@@ -76,23 +83,32 @@ public abstract class OptimizedTriggerBase : ITrigger
 
                 if (AutoReset)
                 {
-                    // 自动复位：等待一段时间后复位状态，但保持 _wasTriggered 不变
-                    // 这样可以在下一个 OnPollingComplete 中检测到触发
+                    // H-1 修复：安全取消并复用 CTS
+                    var oldCts = _resetCts;
+                    var newCts = new CancellationTokenSource();
+                    _resetCts = newCts;
+
+                    // 取消旧任务
+                    try { oldCts?.Cancel(); } catch { }
+                    try { oldCts?.Dispose(); } catch { }
+
+                    // 自动复位：等待一段时间后复位状态
                     _ = Task.Run(async () =>
                     {
                         try
                         {
-                            await Task.Delay(1000).ConfigureAwait(false);
-                            if (State == TriggerState.Triggered)
+                            await Task.Delay(1000, newCts.Token).ConfigureAwait(false);
+                            if (!_disposed && State == TriggerState.Triggered)
                                 State = TriggerState.Monitoring;
                         }
-                        catch { }
+                        catch (OperationCanceledException) { }
+                        catch (Exception) { /* H-10 修复：不吞致命异常 */ }
                     });
                 }
             }
             return triggered;
         }
-        catch
+        catch (Exception)
         {
             State = TriggerState.Error;
             return false;
@@ -120,8 +136,13 @@ public abstract class OptimizedTriggerBase : ITrigger
     {
         if (_disposed) return;
         _disposed = true;
+        // 取消复位任务，防止访问已 Dispose 对象
+        _resetCts?.Cancel();
+        _resetCts?.Dispose();
+        _resetCts = null;
         Stop();
         OnDispose();
+        StateChanged = null; // 断开事件订阅链
         GC.SuppressFinalize(this);
     }
 
@@ -149,25 +170,21 @@ public abstract class OptimizedTriggerBase : ITrigger
     protected virtual void OnLogPathSet() { }
 
     /// <summary>
-    /// 记录日志
+    /// 记录日志 - C-3 修复：统一使用 SimpleLogger，避免静态 StreamWriter 跨触发器竞争
     /// </summary>
     protected void Log(TraceLevel level, string message)
     {
         // 检查全局日志开关和日志路径
         if (!LoggerConfig.IsEnabled || string.IsNullOrEmpty(_logPath)) return;
 
-        try
+        var levelName = level switch
         {
-            var levelName = level switch
-            {
-                TraceLevel.Error => "ERROR",
-                TraceLevel.Warning => "WARN",
-                TraceLevel.Info => "INFO",
-                _ => "DEBUG"
-            };
-            var logEntry = $"[{DateTime.Now:HH:mm:ss}] [{levelName}] [{GetType().Name}] {message}";
-            System.IO.File.AppendAllText(_logPath, logEntry + "\n");
-        }
-        catch { /* 忽略日志写入错误 */ }
+            TraceLevel.Error => "ERROR",
+            TraceLevel.Warning => "WARN",
+            TraceLevel.Info => "INFO",
+            _ => "DEBUG"
+        };
+        var logEntry = $"[{DateTime.Now:HH:mm:ss}] [{levelName}] [{GetType().Name}] {message}";
+        SimpleLogger.Log(logEntry);
     }
 }

@@ -48,10 +48,10 @@ public class AppStartTrigger : OptimizedTriggerBase
         lock (_knownProcesses)
         {
             _knownProcesses.Clear();
-            var existing = FindMatchingProcesses(_processName);
-            foreach (var p in existing)
+            var existing = FindMatchingProcessIds(_processName);
+            foreach (var id in existing)
             {
-                try { _knownProcesses.Add(p.Id); } catch { }
+                _knownProcesses.Add(id);
             }
         }
     }
@@ -60,30 +60,88 @@ public class AppStartTrigger : OptimizedTriggerBase
     {
         lock (_knownProcesses)
         {
-            var current = FindMatchingProcesses(_processName);
+            var currentIds = FindMatchingProcessIds(_processName);
 
-            foreach (var p in current)
+            foreach (var id in currentIds)
             {
-                try
+                if (!_knownProcesses.Contains(id))
                 {
-                    if (!_knownProcesses.Contains(p.Id))
-                    {
-                        _knownProcesses.Add(p.Id);
-                        return ValueTask.FromResult(true);
-                    }
+                    _knownProcesses.Add(id);
+                    return ValueTask.FromResult(true);
                 }
-                catch { }
             }
 
             // 清理已退出的进程
-            _knownProcesses.RemoveWhere(id => current.All(p => p.Id != id));
+            _knownProcesses.RemoveWhere(id => !currentIds.Contains(id));
         }
 
         return ValueTask.FromResult(false);
     }
 
     /// <summary>
-    /// 智能匹配进程 - 支持多种匹配方式（公共静态，供其他触发器使用）
+    /// 智能匹配进程 - 返回匹配进程的 ID 列表（H-7 修复：不返回 Process 对象，避免访问已 Dispose 的对象）
+    /// </summary>
+    public static List<int> FindMatchingProcessIds(string config)
+    {
+        var allProcesses = Process.GetProcesses();
+        var matchedIds = new HashSet<int>();
+        try
+        {
+            // 方式1: 精确匹配进程名（不含.exe）
+            var cleanName = config.ToLower().Replace(".exe", "").Trim();
+            foreach (var p in allProcesses)
+            {
+                if (p.ProcessName.Equals(cleanName, StringComparison.OrdinalIgnoreCase))
+                    matchedIds.Add(p.Id);
+            }
+
+            if (matchedIds.Count > 0) return matchedIds.ToList();
+
+            // 方式2: 尝试第一个单词（"Palworld v1.0" -> "palworld"）
+            var firstWord = cleanName.Split(new[] { ' ', '\t', '-' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+            if (!string.IsNullOrEmpty(firstWord) && firstWord != cleanName)
+            {
+                foreach (var p in allProcesses)
+                {
+                    if (p.ProcessName.Equals(firstWord, StringComparison.OrdinalIgnoreCase))
+                        matchedIds.Add(p.Id);
+                }
+            }
+
+            if (matchedIds.Count > 0) return matchedIds.ToList();
+
+            // 方式3: 包含匹配（进程名包含配置字符串）
+            foreach (var p in allProcesses)
+            {
+                if (p.ProcessName.Contains(cleanName, StringComparison.OrdinalIgnoreCase) ||
+                    cleanName.Contains(p.ProcessName, StringComparison.OrdinalIgnoreCase))
+                    matchedIds.Add(p.Id);
+            }
+
+            if (matchedIds.Count > 0) return matchedIds.ToList();
+
+            // 方式4: 尝试匹配 MainWindowTitle（窗口标题）
+            foreach (var p in allProcesses)
+            {
+                if (!string.IsNullOrEmpty(p.MainWindowTitle) &&
+                    p.MainWindowTitle.Contains(config, StringComparison.OrdinalIgnoreCase))
+                    matchedIds.Add(p.Id);
+            }
+
+            return matchedIds.ToList();
+        }
+        finally
+        {
+            // 释放所有 Process 句柄
+            foreach (var p in allProcesses)
+            {
+                try { p.Dispose(); } catch { }
+            }
+        }
+    }
+
+    /// <summary>
+    /// 智能匹配进程 - 返回匹配的 Process 列表（供需要 Process 对象的场景使用）
     /// 注意：返回的 Process 对象需要调用者释放
     /// </summary>
     public static List<Process> FindMatchingProcesses(string config)
@@ -102,8 +160,8 @@ public class AppStartTrigger : OptimizedTriggerBase
 
             if (matches.Count > 0) return matches.Distinct().ToList();
 
-            // 方式2: 尝试第一个单词（"Palworld v1.0" -> "palworld"）
-            var firstWord = cleanName.Split(new[] { ' ', '\t', '-', '_' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+            // 方式2: 尝试第一个单词
+            var firstWord = cleanName.Split(new[] { ' ', '\t', '-' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
             if (!string.IsNullOrEmpty(firstWord) && firstWord != cleanName)
             {
                 foreach (var p in allProcesses)
@@ -115,7 +173,7 @@ public class AppStartTrigger : OptimizedTriggerBase
 
             if (matches.Count > 0) return matches.Distinct().ToList();
 
-            // 方式3: 包含匹配（进程名包含配置字符串）
+            // 方式3: 包含匹配
             foreach (var p in allProcesses)
             {
                 if (p.ProcessName.Contains(cleanName, StringComparison.OrdinalIgnoreCase) ||
@@ -125,7 +183,7 @@ public class AppStartTrigger : OptimizedTriggerBase
 
             if (matches.Count > 0) return matches.Distinct().ToList();
 
-            // 方式4: 尝试匹配 MainWindowTitle（窗口标题）
+            // 方式4: 尝试匹配 MainWindowTitle
             foreach (var p in allProcesses)
             {
                 if (!string.IsNullOrEmpty(p.MainWindowTitle) &&
@@ -138,11 +196,17 @@ public class AppStartTrigger : OptimizedTriggerBase
         finally
         {
             // 释放不需要的 Process 句柄，只保留匹配的
-            var matchedIds = new HashSet<int>(matches.Select(m => m.Id));
+            var matchedIds = new HashSet<int>();
+            foreach (var m in matches)
+            {
+                try { matchedIds.Add(m.Id); } catch { }
+            }
             foreach (var p in allProcesses)
             {
                 if (!matchedIds.Contains(p.Id))
-                    p.Dispose();
+                {
+                    try { p.Dispose(); } catch { }
+                }
             }
         }
     }
@@ -216,10 +280,10 @@ public class AppCloseTrigger : OptimizedTriggerBase
         lock (_trackedProcesses)
         {
             _trackedProcesses.Clear();
-            var existing = AppStartTrigger.FindMatchingProcesses(_processName);
-            foreach (var p in existing)
+            var existing = AppStartTrigger.FindMatchingProcessIds(_processName);
+            foreach (var id in existing)
             {
-                try { _trackedProcesses.Add(p.Id); } catch { }
+                _trackedProcesses.Add(id);
             }
         }
     }
@@ -228,14 +292,7 @@ public class AppCloseTrigger : OptimizedTriggerBase
     {
         lock (_trackedProcesses)
         {
-            // 使用智能匹配
-            var current = AppStartTrigger.FindMatchingProcesses(_processName);
-            var currentIds = new HashSet<int>();
-
-            foreach (var p in current)
-            {
-                try { currentIds.Add(p.Id); } catch { }
-            }
+            var currentIds = AppStartTrigger.FindMatchingProcessIds(_processName);
 
             // 检查哪些进程已退出
             var exited = _trackedProcesses.Where(id => !currentIds.Contains(id)).ToList();

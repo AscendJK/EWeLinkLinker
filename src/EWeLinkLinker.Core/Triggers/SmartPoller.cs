@@ -14,6 +14,7 @@ public sealed class SmartPoller : IDisposable
     private CancellationToken _ct;
     private bool _isTriggered;
     private bool _disposed;
+    private int _isChecking;  // H-3 修复：防止重叠执行
 
     /// <summary>
     /// 创建智能轮询器
@@ -73,6 +74,10 @@ public sealed class SmartPoller : IDisposable
     {
         if (_disposed || _checkAction == null || _ct.IsCancellationRequested) return;
 
+        // H-3 修复：防止重叠执行
+        if (Interlocked.CompareExchange(ref _isChecking, 1, 0) != 0)
+            return;
+
         try
         {
             // 取消上一个未完成的检查
@@ -95,6 +100,10 @@ public sealed class SmartPoller : IDisposable
         {
             // 其他错误，使用错误间隔
             _timer?.Change(_errorInterval, _errorInterval);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _isChecking, 0);
         }
     }
 
@@ -125,7 +134,12 @@ public sealed class DelayedAction : IDisposable
         _timer?.Dispose();
         _timer = new Timer(_ =>
         {
-            try { action(); } catch { }
+            try { action(); }
+            catch (Exception ex)
+            {
+                // H-14 修复：至少写入 Debug 输出，不完全静默
+                System.Diagnostics.Debug.WriteLine($"DelayedAction 执行异常: {ex.Message}");
+            }
         }, null, delay, Timeout.InfiniteTimeSpan);
     }
 

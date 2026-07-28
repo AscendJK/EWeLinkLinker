@@ -173,115 +173,81 @@ public class CloudClient
     public async Task<List<DeviceInfo>> GetDevicesAsync(string accessToken)
     {
         var url = $"{BaseUrl}/v2/device/thing?num=0";
-        SimpleLogger.Log($"GetDevices: URL={url}");
 
         var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Add("Authorization", $"Bearer {accessToken}");
 
         using var response = await _http.SendAsync(request);
-        SimpleLogger.Log($"GetDevices: HTTP Status={(int)response.StatusCode}");
 
         if (!response.IsSuccessStatusCode)
         {
             var errorBody = await response.Content.ReadAsStringAsync();
-            SimpleLogger.Log($"GetDevices: Error response={errorBody}");
-            response.EnsureSuccessStatusCode(); // Will throw
+            SimpleLogger.Log($"[Cloud] GetDevices failed: HTTP {(int)response.StatusCode}, {errorBody}");
+            response.EnsureSuccessStatusCode();
         }
 
         var json = await response.Content.ReadAsStringAsync();
-        SimpleLogger.Log($"GetDevices: Response length={json.Length}, preview={json[..Math.Min(200, json.Length)]}");
 
         using var doc = JsonDocument.Parse(json);
 
-        // Check response structure
-        if (!doc.RootElement.TryGetProperty("data", out var data))
+        if (!doc.RootElement.TryGetProperty("data", out var data) ||
+            !data.TryGetProperty("thingList", out var thingList) ||
+            thingList.ValueKind != JsonValueKind.Array)
         {
-            SimpleLogger.Log("GetDevices: No 'data' property in response");
-            SimpleLogger.Log($"GetDevices: Root properties: {string.Join(", ", doc.RootElement.EnumerateObject().Select(p => p.Name))}");
-            return new List<DeviceInfo>();
-        }
-
-        if (!data.TryGetProperty("thingList", out var thingList))
-        {
-            SimpleLogger.Log("GetDevices: No 'thingList' in data");
-            SimpleLogger.Log($"GetDevices: data properties: {string.Join(", ", data.EnumerateObject().Select(p => p.Name))}");
-            return new List<DeviceInfo>();
-        }
-
-        if (thingList.ValueKind != JsonValueKind.Array)
-        {
-            SimpleLogger.Log($"GetDevices: thingList is not an array (kind={thingList.ValueKind})");
+            SimpleLogger.Log("[Cloud] GetDevices: unexpected response structure");
             return new List<DeviceInfo>();
         }
 
         var devices = new List<DeviceInfo>();
-        SimpleLogger.Log($"GetDevices: thingList has {thingList.GetArrayLength()} items");
-
         foreach (var item in thingList.EnumerateArray())
         {
-            // V2 API wraps device data in "itemData" property
-            if (item.TryGetProperty("itemData", out var deviceData))
+            if (!item.TryGetProperty("itemData", out var deviceData))
+                continue;
+
+            var powerState = "off";
+            if (deviceData.TryGetProperty("params", out var paramsObj) &&
+                paramsObj.TryGetProperty("switches", out var switches) &&
+                switches.ValueKind == JsonValueKind.Array &&
+                switches.GetArrayLength() > 0)
             {
-                // Parse switch state from params.switches[0].switch
-                var powerState = "off";
-                if (deviceData.TryGetProperty("params", out var paramsObj) &&
-                    paramsObj.TryGetProperty("switches", out var switches) &&
-                    switches.ValueKind == JsonValueKind.Array &&
-                    switches.GetArrayLength() > 0)
-                {
-                    var firstSwitch = switches[0];
-                    if (firstSwitch.TryGetProperty("switch", out var switchState))
-                    {
-                        powerState = switchState.GetString() ?? "off";
-                    }
-                }
-
-                // Get MAC address from extra.mac
-                var macAddress = string.Empty;
-                if (deviceData.TryGetProperty("extra", out var extra) &&
-                    extra.TryGetProperty("mac", out var mac))
-                {
-                    macAddress = mac.GetString() ?? "";
-                }
-
-                // Determine channel count and per-channel states from switches array
-                var channelCount = 1;
-                var channelStates = new List<string> { powerState };
-                if (deviceData.TryGetProperty("params", out var devParams) &&
-                    devParams.TryGetProperty("switches", out var swArray) &&
-                    swArray.ValueKind == JsonValueKind.Array)
-                {
-                    channelCount = Math.Max(1, swArray.GetArrayLength());
-                    channelStates = new List<string>();
-                    foreach (var sw in swArray.EnumerateArray())
-                    {
-                        channelStates.Add(sw.TryGetProperty("switch", out var swState) ? swState.GetString() ?? "off" : "off");
-                    }
-                }
-
-                var device = new DeviceInfo
-                {
-                    DeviceId = deviceData.TryGetProperty("deviceid", out var id) ? id.GetString() ?? "" : "",
-                    Name = deviceData.TryGetProperty("name", out var name) ? name.GetString() ?? "Unknown" : "Unknown",
-                    IpAddress = deviceData.TryGetProperty("ip", out var ip) ? ip.GetString() ?? "" : "",
-                    DeviceKey = deviceData.TryGetProperty("devicekey", out var key) ? key.GetString() ?? "" : "",
-                    DeviceApiKey = deviceData.TryGetProperty("apikey", out var apikey) ? apikey.GetString() ?? "" : "",
-                    MacAddress = macAddress,
-                    Uuid = deviceData.TryGetProperty("uuid", out var uuid) ? uuid.GetInt32() : 0,
-                    IsOnline = deviceData.TryGetProperty("online", out var online) && online.GetBoolean(),
-                    ChannelCount = channelCount,
-                    ChannelStates = channelStates
-                };
-                devices.Add(device);
-                SimpleLogger.Log($"Cloud device: {device.Name} ({device.DeviceId}) Channels={device.ChannelCount} States=[{string.Join(",", device.ChannelStates)}]");
+                var firstSwitch = switches[0];
+                if (firstSwitch.TryGetProperty("switch", out var switchState))
+                    powerState = switchState.GetString() ?? "off";
             }
-            else
+
+            var macAddress = string.Empty;
+            if (deviceData.TryGetProperty("extra", out var extra) &&
+                extra.TryGetProperty("mac", out var mac))
+                macAddress = mac.GetString() ?? "";
+
+            var channelCount = 1;
+            var channelStates = new List<string> { powerState };
+            if (deviceData.TryGetProperty("params", out var devParams) &&
+                devParams.TryGetProperty("switches", out var swArray) &&
+                swArray.ValueKind == JsonValueKind.Array)
             {
-                SimpleLogger.Log($"GetDevices: item has no 'itemData'. Properties: {string.Join(", ", item.EnumerateObject().Select(p => p.Name))}");
+                channelCount = Math.Max(1, swArray.GetArrayLength());
+                channelStates = new List<string>();
+                foreach (var sw in swArray.EnumerateArray())
+                    channelStates.Add(sw.TryGetProperty("switch", out var swState) ? swState.GetString() ?? "off" : "off");
             }
+
+            devices.Add(new DeviceInfo
+            {
+                DeviceId = deviceData.TryGetProperty("deviceid", out var id) ? id.GetString() ?? "" : "",
+                Name = deviceData.TryGetProperty("name", out var name) ? name.GetString() ?? "Unknown" : "Unknown",
+                IpAddress = deviceData.TryGetProperty("ip", out var ip) ? ip.GetString() ?? "" : "",
+                DeviceKey = deviceData.TryGetProperty("devicekey", out var key) ? key.GetString() ?? "" : "",
+                DeviceApiKey = deviceData.TryGetProperty("apikey", out var apikey) ? apikey.GetString() ?? "" : "",
+                MacAddress = macAddress,
+                Uuid = deviceData.TryGetProperty("uuid", out var uuid) ? uuid.GetInt32() : 0,
+                IsOnline = deviceData.TryGetProperty("online", out var online) && online.GetBoolean(),
+                ChannelCount = channelCount,
+                ChannelStates = channelStates
+            });
         }
 
-        SimpleLogger.Log($"Total devices found: {devices.Count}");
+        SimpleLogger.Log($"[Cloud] GetDevices: {devices.Count} devices");
         return devices;
     }
 }

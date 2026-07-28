@@ -61,9 +61,12 @@ public class TimeTrigger : OptimizedTriggerBase
 
     private bool EqCheck(DateTime now, DateTime today)
     {
+        // C-7 修复：使用"今日是否已触发" + "首次进入窗口时触发"
+        // 扩大窗口到整个轮询间隔，避免边界错过
         if (_lastTriggeredDate == today) return false;
         var diff = now.TimeOfDay - _time;
-        var isMatch = diff >= TimeSpan.Zero && diff <= TimeSpan.FromSeconds(30);
+        // 窗口：diff >= 0（已过目标时间）且 diff <= PollingInterval（首次进入窗口）
+        var isMatch = diff >= TimeSpan.Zero && diff <= PollingInterval;
         if (isMatch) _lastTriggeredDate = today;
         return isMatch;
     }
@@ -72,13 +75,14 @@ public class TimeTrigger : OptimizedTriggerBase
     {
         if (_lastTriggeredDate == today) return false;
         var diff = now.TimeOfDay - _time;
-        var isOutSide = diff > TimeSpan.FromSeconds(30) || diff < TimeSpan.Zero;
+        var isOutSide = diff > PollingInterval || diff < TimeSpan.Zero;
         if (isOutSide) _lastTriggeredDate = today;
         return isOutSide;
     }
 
     private bool GteCheck(DateTime now, DateTime today)
     {
+        // C-8 修复：语义为"每天到达目标时间时触发一次"
         if (_lastTriggeredDate == today) return false;
         if (now.TimeOfDay >= _time)
         {
@@ -90,6 +94,8 @@ public class TimeTrigger : OptimizedTriggerBase
 
     private bool LtCheck(DateTime now, DateTime today)
     {
+        // C-8 修复：语义为"每天在目标时间之前触发一次"
+        // 注意：如果启动时间已在目标时间之后，今天不再触发（等明天）
         if (_lastTriggeredDate == today) return false;
         if (now.TimeOfDay < _time)
         {

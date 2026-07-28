@@ -26,12 +26,14 @@ public sealed class PollingScheduler : IAsyncDisposable
     private bool _disposed;
     private readonly object _lock = new();
     private readonly ServiceLogger _logger;
-    private SemaphoreSlim? _semaphore;
+    private readonly SemaphoreSlim _semaphore;  // C-1 修复：构造函数初始化，避免竞态
+    private int _isPolling;  // H-4 修复：防止重叠执行
 
     public PollingScheduler(ServiceLogger logger, TimeSpan? baseInterval = null)
     {
         _logger = logger;
         _baseInterval = baseInterval ?? TimeSpan.FromSeconds(10);
+        _semaphore = new SemaphoreSlim(4, 4);
     }
 
     public void Register(OptimizedTriggerBase trigger)
@@ -142,46 +144,71 @@ public sealed class PollingScheduler : IAsyncDisposable
     {
         if (_disposed) return;
 
-        // 使用局部变量避免闭包捕获字段
-        Dictionary<string, OptimizedTriggerBase> triggers;
-        List<IPostPollCallback> callbacks;
+        // H-4 修复：防止重叠执行。如果上次轮询还未完成，直接跳过本次
+        if (Interlocked.CompareExchange(ref _isPolling, 1, 0) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await PollAllCoreAsync();
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _isPolling, 0);
+        }
+    }
+
+    private async Task PollAllCoreAsync()
+    {
+        // 在锁内复制引用到局部变量，避免闭包捕获字段
+        // 注意：只复制引用（struct copy），不创建新集合，减少 GC 压力
+        OptimizedTriggerBase[] triggerArray;
+        IPostPollCallback[] callbackArray;
         lock (_lock)
         {
             if (!_isRunning) return;
-            triggers = new Dictionary<string, OptimizedTriggerBase>(_triggers);
-            callbacks = new List<IPostPollCallback>(_postPollCallbacks);
+            triggerArray = new OptimizedTriggerBase[_triggers.Count];
+            _triggers.Values.CopyTo(triggerArray, 0);
+            callbackArray = new IPostPollCallback[_postPollCallbacks.Count];
+            _postPollCallbacks.CopyTo(callbackArray, 0);
         }
 
-        if (triggers.Count == 0) return;
+        if (triggerArray.Length == 0) return;
 
         // 并发轮询所有触发器，但限制并发数（复用 semaphore 减少 GC）
-        _semaphore ??= new SemaphoreSlim(4, 4);
-        var tasks = triggers.Select(async kvp =>
+        var tasks = new Task[triggerArray.Length];
+        for (int i = 0; i < triggerArray.Length; i++)
         {
-            await _semaphore.WaitAsync();
-            try
+            var trigger = triggerArray[i];  // 局部变量避免闭包捕获
+            tasks[i] = Task.Run(async () =>
             {
-                // 直接轮询，触发器内部通过 _wasTriggered 防止重复触发
-                var triggered = await kvp.Value.PollAsync(CancellationToken.None);
-                if (triggered)
+                await _semaphore.WaitAsync().ConfigureAwait(false);
+                try
                 {
-                    _logger.Info($"✓ 条件触发: {kvp.Value.DisplayName} ({kvp.Value.Id})");
+                    // 直接轮询，触发器内部通过 _wasTriggered 防止重复触发
+                    var triggered = await trigger.PollAsync(CancellationToken.None);
+                    if (triggered)
+                    {
+                        _logger.Info($"✓ 条件触发: {trigger.DisplayName} ({trigger.Id})");
+                    }
                 }
-            }
-            catch (Exception ex)
-            {
-                _logger.Error($"轮询错误 {kvp.Key}", ex);
-            }
-            finally
-            {
-                _semaphore.Release();
-            }
-        });
+                catch (Exception ex)
+                {
+                    _logger.Error($"轮询错误 {trigger.Id}", ex);
+                }
+                finally
+                {
+                    _semaphore.Release();
+                }
+            });
+        }
 
         await Task.WhenAll(tasks);
 
         // 轮询完成后调用回调，让组合触发器可以评估复合条件
-        foreach (var callback in callbacks)
+        foreach (var callback in callbackArray)
         {
             try
             {
@@ -201,7 +228,6 @@ public sealed class PollingScheduler : IAsyncDisposable
         Stop();
         _triggers.Clear();
         _postPollCallbacks.Clear();
-        _semaphore?.Dispose();
-        _semaphore = null;
+        _semaphore.Dispose();
     }
 }

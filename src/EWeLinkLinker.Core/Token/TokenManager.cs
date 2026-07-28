@@ -7,6 +7,8 @@ namespace EWeLinkLinker.Core.Token;
 public class TokenManager(CloudClient cloudClient, string configPath)
 {
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
+    // 静态复用 JwtSecurityTokenHandler（线程安全）
+    private static readonly JwtSecurityTokenHandler JwtHandler = new();
 
     public async Task<AuthTokens> GetValidTokensAsync()
     {
@@ -48,10 +50,12 @@ public class TokenManager(CloudClient cloudClient, string configPath)
         cloudClient.Region = config.Account.Region;
         var newTokens = await cloudClient.RefreshTokenAsync(config.Tokens.RefreshToken);
 
-        config.Tokens.AccessToken = newTokens.AccessToken;
-        config.Tokens.RefreshToken = newTokens.RefreshToken;
-        config.Tokens.UserApiKey = newTokens.UserApiKey;
-        config.Save(configPath);
+        // C-1 修复：重新加载最新 config，避免覆盖 ConfigApp 的并发改动
+        var freshConfig = Config.LinkerConfig.Load(configPath);
+        freshConfig.Tokens.AccessToken = newTokens.AccessToken;
+        freshConfig.Tokens.RefreshToken = newTokens.RefreshToken;
+        freshConfig.Tokens.UserApiKey = newTokens.UserApiKey;
+        freshConfig.Save(configPath);
 
         return newTokens;
     }
@@ -63,8 +67,8 @@ public class TokenManager(CloudClient cloudClient, string configPath)
     {
         try
         {
-            var handler = new JwtSecurityTokenHandler();
-            var jwtToken = handler.ReadJwtToken(token);
+            // 复用静态 Handler，避免重复创建
+            var jwtToken = JwtHandler.ReadJwtToken(token);
 
             if (jwtToken.ValidTo == DateTime.MinValue)
             {
@@ -97,16 +101,21 @@ public class TokenManager(CloudClient cloudClient, string configPath)
             cloudClient.Region = ex.CorrectRegion;
             var (tokens, _) = await cloudClient.LoginAsync(email, password, countryCode);
             // Persist the correct region so next startup uses it
+            // C-2 修复：重新加载最新 config，设置正确区域后保存 Token
             var config = Config.LinkerConfig.Load(configPath);
             config.Account.Region = ex.CorrectRegion;
-            SaveTokensToConfig(tokens, config);
+            config.Tokens.AccessToken = tokens.AccessToken;
+            config.Tokens.RefreshToken = tokens.RefreshToken;
+            config.Tokens.UserApiKey = tokens.UserApiKey;
+            config.Save(configPath);
             return tokens;
         }
     }
 
-    private void SaveTokensToConfig(AuthTokens tokens, Config.LinkerConfig? existingConfig = null)
+    private void SaveTokensToConfig(AuthTokens tokens)
     {
-        var config = existingConfig ?? Config.LinkerConfig.Load(configPath);
+        // C-2 修复：始终从磁盘加载最新 config，避免覆盖并发改动
+        var config = Config.LinkerConfig.Load(configPath);
         config.Tokens.AccessToken = tokens.AccessToken;
         config.Tokens.RefreshToken = tokens.RefreshToken;
         config.Tokens.UserApiKey = tokens.UserApiKey;

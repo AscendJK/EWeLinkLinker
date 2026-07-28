@@ -22,6 +22,14 @@ public class IntervalTrigger : OptimizedTriggerBase
         if (!ValidateParameter(config.Parameter, out var error))
             throw new ArgumentException(error);
         _intervalMinutes = int.Parse(config.Parameter!);
+        // H-18 修复：不在构造函数中设置 _lastTriggered，改为 OnStart 中设置
+        // 这样首次触发时间从 Start 时刻算起，而非构造时刻
+        _lastTriggered = DateTime.MinValue;
+    }
+
+    protected override void OnStart()
+    {
+        // H-18 修复：每次 Start 时重置计时器
         _lastTriggered = DateTime.Now;
     }
 

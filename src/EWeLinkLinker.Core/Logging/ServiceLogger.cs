@@ -1,14 +1,18 @@
+using System.Collections.Concurrent;
+using System.Threading.Channels;
 using EWeLinkLinker.Core.Models;
 
 namespace EWeLinkLinker.Core.Logging;
 
 /// <summary>
-/// 统一的服务端日志记录器
+/// 统一的服务端日志记录器 - 使用 Channel + 后台批量写入，避免频繁打开/关闭文件句柄
 /// </summary>
-public sealed class ServiceLogger
+public sealed class ServiceLogger : IAsyncDisposable
 {
     private readonly string _logPath;
-    private static readonly object LogLock = new();
+    private readonly Channel<string> _logChannel;
+    private readonly CancellationTokenSource _cts = new();
+    private readonly Task _writerTask;
     private volatile bool _enabled;
 
     public ServiceLogger(string logPath, bool enabled = true)
@@ -22,6 +26,17 @@ public sealed class ServiceLogger
         }
         // 启动时清理旧日志
         CleanupOldLogs(logDir);
+
+        // 创建有界 Channel（容量 1000），避免内存无限增长
+        _logChannel = Channel.CreateBounded<string>(new BoundedChannelOptions(1000)
+        {
+            FullMode = BoundedChannelFullMode.DropOldest,  // 队列满时丢弃最旧的
+            SingleWriter = false,
+            SingleReader = true
+        });
+
+        // 启动后台写入任务
+        _writerTask = Task.Run(ProcessLogQueueAsync);
     }
 
     /// <summary>
@@ -34,7 +49,7 @@ public sealed class ServiceLogger
         {
             var cutoff = DateTime.Now.AddDays(-7);
             var oldFiles = Directory.GetFiles(logDir, "service-*.log")
-                .Where(f => Path.GetFileName(f).Length >= 22 &&  // service-YYYY-MM-DD.log
+                .Where(f => Path.GetFileName(f).Length >= 22 &&
                            DateTime.TryParseExact(
                                Path.GetFileName(f).Substring(8, 10),
                                "yyyy-MM-dd",
@@ -52,6 +67,63 @@ public sealed class ServiceLogger
             }
         }
         catch { }
+    }
+
+    // H-20 修复：批量刷新相关
+    private const int BatchSize = 50;           // 积累 50 条后刷新
+    private const int FlushIntervalMs = 1000;   // 或最多 1 秒刷新一次
+    private int _sinceLastFlush;
+
+    /// <summary>
+    /// 后台批量写入日志到文件（单个 StreamWriter 复用，批量 Flush 提升性能）
+    /// </summary>
+    private async Task ProcessLogQueueAsync()
+    {
+        try
+        {
+            using var stream = new FileStream(_logPath, FileMode.Append, FileAccess.Write, FileShare.Read,
+                bufferSize: 4096, useAsync: true);
+            using var writer = new StreamWriter(stream) { AutoFlush = false };
+
+            // H-14 修复：定期 Flush 确保数据不丢失
+            using var flushTimer = new PeriodicTimer(TimeSpan.FromMilliseconds(FlushIntervalMs));
+
+            var readTask = _logChannel.Reader.ReadAllAsync(_cts.Token);
+            var enumerator = readTask.GetAsyncEnumerator(_cts.Token);
+
+            while (true)
+            {
+                // 交替等待：日志写入 或 定时刷新
+                var logTask = enumerator.MoveNextAsync().AsTask();
+                var timerTask = flushTimer.WaitForNextTickAsync().AsTask();
+
+                var completed = await Task.WhenAny(logTask, timerTask).ConfigureAwait(false);
+
+                if (completed == logTask && logTask.Result)
+                {
+                    await writer.WriteLineAsync(enumerator.Current).ConfigureAwait(false);
+                    _sinceLastFlush++;
+                }
+
+                // 达到批量大小 或 定时器触发 → 刷新
+                if (_sinceLastFlush >= BatchSize || (completed == timerTask && _sinceLastFlush > 0))
+                {
+                    await writer.FlushAsync().ConfigureAwait(false);
+                    _sinceLastFlush = 0;
+                }
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (ChannelClosedException)
+        {
+            // 通道关闭前刷新剩余数据
+            // writer 会在 using 中自动 Flush
+        }
+        catch (Exception ex)
+        {
+            // H-13 修复：后台任务异常至少写入 Debug/Console，避免完全静默
+            System.Diagnostics.Debug.WriteLine($"[ServiceLogger] 后台写入异常: {ex.Message}");
+        }
     }
 
     public bool Enabled
@@ -204,19 +276,28 @@ public sealed class ServiceLogger
         return $"设备[{action.DeviceName}] 通道{action.Outlet} -> {state}";
     }
 
+    /// <summary>
+    /// 非阻塞写入日志到 Channel
+    /// </summary>
     private void Log(string level, string message)
     {
         // 检查全局开关和本地开关
         if (!LoggerConfig.IsEnabled || !_enabled) return;
-        try
-        {
-            var logEntry = $"[{DateTime.Now:HH:mm:ss.fff}] [{level}] {message}";
-            lock (LogLock)
-            {
-                File.AppendAllText(_logPath, logEntry + "\n");
-            }
-        }
-        catch { }
+
+        var logEntry = $"[{DateTime.Now:HH:mm:ss.fff}] [{level}] {message}";
+        // 尝试写入 Channel（非阻塞，队列满时丢弃最旧的）
+        _logChannel.Writer.TryWrite(logEntry);
+    }
+
+    /// <summary>
+    /// 异步刷新并关闭日志写入器
+    /// </summary>
+    public async ValueTask DisposeAsync()
+    {
+        _cts.Cancel();
+        _logChannel.Writer.Complete();
+        try { await _writerTask.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
+        _cts.Dispose();
     }
 }
 

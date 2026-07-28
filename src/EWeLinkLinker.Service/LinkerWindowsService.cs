@@ -149,14 +149,18 @@ public class LinkerWindowsService : ServiceBase
                 NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime | NotifyFilters.FileName
             };
 
-            // 使用防抖，避免短时间内多次触发
+            // C-4 修复：使用 lock 保护防抖变量，避免多线程并发问题
+            var debounceLock = new object();
             var lastRead = DateTime.MinValue;
             void HandleConfigChange(object s, FileSystemEventArgs e)
             {
                 // 防抖：500ms 内只处理一次
-                var now = DateTime.Now;
-                if ((now - lastRead).TotalMilliseconds < 500) return;
-                lastRead = now;
+                lock (debounceLock)
+                {
+                    var now = DateTime.Now;
+                    if ((now - lastRead).TotalMilliseconds < 500) return;
+                    lastRead = now;
+                }
 
                 Log($"Config file changed: {e.ChangeType} - {e.FullPath}");
                 _ = Task.Run(async () =>
@@ -189,6 +193,7 @@ public class LinkerWindowsService : ServiceBase
 
     /// <summary>
     /// 重新加载配置
+    /// H-2 修复：重新初始化客户端以获取新 Token
     /// </summary>
     private async Task ReloadConfigAsync()
     {
@@ -202,6 +207,11 @@ public class LinkerWindowsService : ServiceBase
         _logger.Enabled = config.LoggingEnabled;
 
         Log("Reloading config...");
+
+        // H-2 修复：重新初始化客户端，使新 Token 生效
+        // 用户在 ConfigApp 登录后，Token 已更新到配置文件
+        // 服务端需要重新读取 Token 才能正常使用云端 API
+        InitializeClients();
 
         // 使用 TriggerManager.ReloadAsync 正确停止旧触发器并加载新触发器
         await _triggerManager.ReloadAsync(config.Rules);
@@ -243,12 +253,13 @@ public class LinkerWindowsService : ServiceBase
         // 停止配置文件监控
         StopConfigWatcher();
 
+        // H-2 修复：使用 GetAwaiter().GetResult() 避免 STA 线程死锁
         // 停止所有触发器（同步等待完成）
         if (_triggerManager != null)
         {
             try
             {
-                _triggerManager.StopAllAsync().AsTask().Wait(TimeSpan.FromSeconds(5));
+                _triggerManager.StopAllAsync().ConfigureAwait(false).GetAwaiter().GetResult();
             }
             catch (Exception ex)
             {
@@ -257,8 +268,21 @@ public class LinkerWindowsService : ServiceBase
             _triggerManager = null;
         }
 
-        // 取消唤醒任务
+        // C-6 修复：取消并释放唤醒任务 CTS
         _wakeCts?.Cancel();
+        _wakeCts?.Dispose();
+        _wakeCts = null;
+
+        // 释放日志后台写入任务
+        try
+        {
+            _logger.DisposeAsync().ConfigureAwait(false).GetAwaiter().GetResult();
+        }
+        catch { }
+
+        // C-5 修复：OnStop 也释放 HttpClient（服务停止时可能非关机）
+        var httpClient = System.Threading.Interlocked.Exchange(ref _sharedHttpClient, null!);
+        httpClient?.Dispose();
     }
 
     protected override void OnShutdown()
@@ -340,6 +364,8 @@ public class LinkerWindowsService : ServiceBase
                 Log("=== SYSTEM RESUMING ===");
                 // 唤醒时可以异步执行，系统不会等待
                 // 延迟3秒让网络设备恢复连接
+                // C-6 修复：覆盖前释放旧 CTS
+                _wakeCts?.Dispose();
                 _wakeCts = new CancellationTokenSource();
                 _ = Task.Run(async () =>
                 {

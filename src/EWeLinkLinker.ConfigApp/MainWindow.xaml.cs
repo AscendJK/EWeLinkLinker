@@ -247,7 +247,7 @@ public partial class MainWindow : Window, IDisposable
                 {
                     Account = AccountTextBox.Text,
                     Password = PasswordBox.Password,
-                    CountryCode = "+86",
+                    CountryCode = GetCountryCodeForRegion(RegionComboBox.Text),
                     Region = RegionComboBox.Text
                 },
                 Tokens = new TokenConfig
@@ -299,6 +299,99 @@ public partial class MainWindow : Window, IDisposable
         }
     }
 
+    /// <summary>
+    /// Bug 修复：仅保存 Token 和账户信息（用于登录后获取云端设备前）
+    /// 优先使用内存中的 _allDevices（含用户刚编辑的 RealMacAddress），磁盘作为后备
+    /// </summary>
+    private void SaveTokensOnly()
+    {
+        try
+        {
+            var existingConfig = LinkerConfig.Load(_configPath);
+
+            // 优先使用内存中的设备列表（用户可能在 UI 上刚编辑过 RealMacAddress）
+            var devicesToSave = _allDevices.Count > 0
+                ? _allDevices
+                : existingConfig.Devices;
+
+            var config = new LinkerConfig
+            {
+                Account = new AccountConfig
+                {
+                    Account = AccountTextBox.Text,
+                    Password = PasswordBox.Password,
+                    CountryCode = GetCountryCodeForRegion(RegionComboBox.Text),
+                    Region = RegionComboBox.Text
+                },
+                Tokens = new TokenConfig
+                {
+                    AccessToken = _accessToken,
+                    RefreshToken = _refreshToken,
+                    UserApiKey = _userApiKey
+                },
+                Devices = devicesToSave,
+                Rules = existingConfig.Rules,  // M-6 修复：登录时保留旧规则，不覆盖
+                LoggingEnabled = existingConfig.LoggingEnabled
+            };
+            config.Save(_configPath);
+            Log("[登录] Token 已保存");
+        }
+        catch (Exception ex)
+        {
+            Log($"[登录] 保存 Token 失败: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Bug 修复：将用户编辑的设备信息合并到云端设备列表中
+    /// 优先从内存 _allDevices 获取（用户可能在 UI 上刚编辑过），磁盘配置作为后备
+    /// </summary>
+    private void MergeDeviceMacAddresses(List<DeviceInfo> cloudDevices)
+    {
+        try
+        {
+            // 优先从内存获取旧设备（用户可能在 UI 上刚编辑过 RealMacAddress）
+            var memoryDevices = _allDevices;
+
+            // 从磁盘加载后备数据
+            var diskDevices = LinkerConfig.Load(_configPath).Devices;
+
+            foreach (var cloudDevice in cloudDevices)
+            {
+                // 先查内存，再查磁盘
+                var oldDevice = memoryDevices.FirstOrDefault(d => d.DeviceId == cloudDevice.DeviceId)
+                             ?? diskDevices.FirstOrDefault(d => d.DeviceId == cloudDevice.DeviceId);
+
+                if (oldDevice != null)
+                {
+                    // 保留用户输入的真实 MAC 地址
+                    if (!string.IsNullOrEmpty(oldDevice.RealMacAddress))
+                    {
+                        cloudDevice.RealMacAddress = oldDevice.RealMacAddress;
+                        Log($"[合并] 设备 {cloudDevice.Name}: RealMac={oldDevice.RealMacAddress}");
+                    }
+
+                    // 保留已有的 IP 地址（如果云端没有返回新 IP）
+                    if (!string.IsNullOrEmpty(oldDevice.IpAddress) &&
+                        string.IsNullOrEmpty(cloudDevice.IpAddress))
+                    {
+                        cloudDevice.IpAddress = oldDevice.IpAddress;
+                    }
+
+                    // 保留用户可能修改过的 DeviceKey
+                    if (!string.IsNullOrEmpty(oldDevice.DeviceKey))
+                    {
+                        cloudDevice.DeviceKey = oldDevice.DeviceKey;
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"[合并] 合并 MAC 地址失败: {ex.Message}");
+        }
+    }
+
     // ─── Device Cards ──────────────────────────────────
 
     private void RebuildDeviceCards()
@@ -309,6 +402,57 @@ public partial class MainWindow : Window, IDisposable
             DeviceCardsPanel.Children.Add(BuildDeviceCard(device));
         }
         DeviceCountText.Text = _allDevices.Count > 0 ? $"({_allDevices.Count} 台设备)" : string.Empty;
+    }
+
+    /// <summary>
+    /// Bug 修复：保存所有规则动作的 DeviceId（在 Devices 集合清空前调用）
+    /// 避免 ComboBox 的 TwoWay 绑定在 ItemsSource 清空时把 null 写回 DeviceId
+    /// </summary>
+    private Dictionary<string, string> SaveActionDeviceIds()
+    {
+        var dict = new Dictionary<string, string>();  // key = ruleId+actionIndex, value = DeviceId
+        foreach (var rule in _rules)
+        {
+            for (int i = 0; i < rule.Actions.Count; i++)
+            {
+                var action = rule.Actions[i];
+                string key = $"{rule.Id}_{i}";
+                dict[key] = action.DeviceId;  // 保存原始值
+            }
+        }
+        return dict;
+    }
+
+    /// <summary>
+    /// Bug 修复：恢复所有规则动作的 DeviceId（在 Devices 集合重新填充后调用）
+    /// </summary>
+    private void RestoreActionDeviceIds(Dictionary<string, string> savedDeviceIds)
+    {
+        if (savedDeviceIds == null) return;
+
+        foreach (var rule in _rules)
+        {
+            for (int i = 0; i < rule.Actions.Count; i++)
+            {
+                var action = rule.Actions[i];
+                string key = $"{rule.Id}_{i}";
+
+                if (savedDeviceIds.TryGetValue(key, out var savedDeviceId))
+                {
+                    // 检查保存的 DeviceId 是否在新的设备列表中存在
+                    var deviceExists = _allDevices.Any(d => d.DeviceId == savedDeviceId);
+                    if (deviceExists)
+                    {
+                        action.DeviceId = savedDeviceId;
+                        action.Name = _allDevices.First(d => d.DeviceId == savedDeviceId).Name;
+                    }
+                    else
+                    {
+                        Log($"[警告] 恢复 DeviceId 失败：设备 {savedDeviceId} 不再存在于设备列表中");
+                    }
+                }
+            }
+        }
     }
 
     private Border BuildDeviceCard(DeviceInfo device)
@@ -1251,10 +1395,18 @@ public partial class MainWindow : Window, IDisposable
             _userApiKey = tokens.UserApiKey;
             _accessToken = tokens.AccessToken;
             _refreshToken = tokens.RefreshToken;
-            // 修复：登录成功后立即保存所有 Token 到配置
-            SaveConfig();
+
+            // Bug 修复：先保存 Token（不保存设备列表），然后获取云端设备并合并旧 MAC 地址
+            SaveTokensOnly();
+
+            // Bug 修复：在清空前保存所有动作的 DeviceId，避免 TwoWay 绑定被清空
+            var savedActionDeviceIds = SaveActionDeviceIds();
 
             var devices = await _cloudClient.GetDevicesAsync(tokens.AccessToken);
+
+            // Bug 修复：从旧配置中合并用户输入的 RealMacAddress，避免登录后丢失
+            MergeDeviceMacAddresses(devices);
+
             _allDevices = devices;
             Devices.Clear();
             foreach (var d in _allDevices) Devices.Add(d);
@@ -1263,6 +1415,12 @@ public partial class MainWindow : Window, IDisposable
             _allDevices = await _lanClient.DiscoverDevicesAsync(_allDevices);
             Devices.Clear();
             foreach (var d in _allDevices) Devices.Add(d);
+
+            // Bug 修复：恢复动作的 DeviceId（在 Devices 集合更新后）
+            RestoreActionDeviceIds(savedActionDeviceIds);
+
+            // 设备发现完成后，保存完整配置（包含 Token + 设备 + IP）
+            SaveConfig();
 
             RebuildDeviceCards();
             Title = "EWeLink Linker";
@@ -1302,10 +1460,19 @@ public partial class MainWindow : Window, IDisposable
         try
         {
             Title = "EWeLink Linker - 正在刷新IP...";
+
+            // Bug 修复：在清空前保存所有动作的 DeviceId
+            var savedActionDeviceIds = SaveActionDeviceIds();
+
             _allDevices = await _lanClient.DiscoverDevicesAsync(_allDevices);
             Devices.Clear();
             foreach (var d in _allDevices) Devices.Add(d);
+
+            // Bug 修复：恢复动作的 DeviceId
+            RestoreActionDeviceIds(savedActionDeviceIds);
+
             RebuildDeviceCards();
+            SaveConfig();
             Title = "EWeLink Linker";
             MessageBox.Show("IP 刷新完成", "刷新完成", MessageBoxButton.OK, MessageBoxImage.Information);
         }
@@ -1342,6 +1509,8 @@ public partial class MainWindow : Window, IDisposable
             }
 
             RebuildDeviceCards();
+            // Bug 修复：刷新状态后保存配置，防止崩溃后丢失
+            SaveConfig();
             Title = "EWeLink Linker";
             MessageBox.Show("状态刷新完成", "刷新完成", MessageBoxButton.OK, MessageBoxImage.Information);
         }
@@ -1369,6 +1538,8 @@ public partial class MainWindow : Window, IDisposable
             {
                 // 只刷新 UI，不清除集合（避免 ComboBox 失去选中项）
                 await Dispatcher.InvokeAsync(RebuildDeviceCards);
+                // Bug 修复：自动发现 IP 后保存配置
+                SaveConfig();
             }
         }
         catch { }

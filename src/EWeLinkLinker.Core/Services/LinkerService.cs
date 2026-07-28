@@ -15,7 +15,6 @@ public class LinkerService
     private readonly string _configPath;
     private readonly string? _logPath;
     private readonly ILogger<LinkerService>? _logger;
-    private static readonly object LogLock = new(); // 修复：跨线程日志安全
 
     public LinkerService(LanClient lanClient, TokenManager tokenManager, string configPath, ILogger<LinkerService>? logger = null, string? logPath = null)
     {
@@ -28,21 +27,10 @@ public class LinkerService
 
     private void Log(string message)
     {
-        // Write to ILogger if available (e.g., in a hosted service)
+        // C-2 修复：统一使用 ILogger + SimpleLogger，移除静态 StreamWriter
         _logger?.LogInformation(message);
-        // Also write to log file if path is specified (e.g., Windows Service)
         if (LoggerConfig.IsEnabled && !string.IsNullOrEmpty(_logPath))
-        {
-            try
-            {
-                var logEntry = $"[{DateTime.Now:HH:mm:ss}] {message}\n";
-                lock (LogLock)
-                {
-                    File.AppendAllText(_logPath, logEntry);
-                }
-            }
-            catch { }
-        }
+            SimpleLogger.Log($"[{DateTime.Now:HH:mm:ss}] {message}");
     }
 
     private void LogError(string message, Exception? ex = null)
@@ -50,18 +38,10 @@ public class LinkerService
         _logger?.LogError(ex, message);
         if (LoggerConfig.IsEnabled && !string.IsNullOrEmpty(_logPath))
         {
-            try
-            {
-                var logEntry = $"[{DateTime.Now:HH:mm:ss}] ERROR: {message}";
-                if (ex != null)
-                    logEntry += $"\n  Exception: {ex.Message}";
-                logEntry += "\n";
-                lock (LogLock)
-                {
-                    File.AppendAllText(_logPath, logEntry);
-                }
-            }
-            catch { }
+            var logEntry = $"[{DateTime.Now:HH:mm:ss}] ERROR: {message}";
+            if (ex != null)
+                logEntry += $"\n  Exception: {ex.Message}";
+            SimpleLogger.Log(logEntry);
         }
     }
 
@@ -194,6 +174,7 @@ public class LinkerService
 
     /// <summary>
     /// 查找匹配的规则（支持新旧格式）
+    /// H-15 修复：移除下划线替换匹配，仅精确匹配
     /// </summary>
     private static LinkerRule? FindMatchingRule(List<LinkerRule> rules, string eventName)
     {
@@ -204,10 +185,8 @@ public class LinkerService
 
         if (match != null) return match;
 
-        // 新格式匹配（Conditions 中的 Type）
+        // 新格式匹配（Conditions 中的 Type）— 精确匹配，不做模糊替换
         return rules.FirstOrDefault(r =>
-            r.Conditions.Any(c =>
-                c.Type.Equals(eventName, StringComparison.OrdinalIgnoreCase) ||
-                c.Type.Replace("_", "").Equals(eventName.Replace("_", ""), StringComparison.OrdinalIgnoreCase)));
+            r.Conditions.Any(c => c.Type.Equals(eventName, StringComparison.OrdinalIgnoreCase)));
     }
 }

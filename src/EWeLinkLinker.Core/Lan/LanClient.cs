@@ -26,67 +26,34 @@ public class LanClient
     {
         var logPath = Path.Combine(AppContext.BaseDirectory, "debug.log");
         Config.LinkerConfig.TrimLogFile(logPath, 2_097_152);
-        SimpleLogger.Log("===== Device Discovery Start =====");
 
         var subnet = DetectLocalSubnet();
-        SimpleLogger.Log($"Subnet: {subnet}");
-        SimpleLogger.Log($"Devices to discover: {knownDevices.Count}");
-
-        foreach (var device in knownDevices)
-        {
-            var status = string.IsNullOrEmpty(device.IpAddress) ? "需要发现IP" : $"已有IP={device.IpAddress}";
-            var macInfo = device.HasLocalMac
-                ? $"CloudMAC={device.MacAddress}" + (!string.IsNullOrEmpty(device.RealMacAddress) ? $", RealMAC={device.RealMacAddress}" : "")
-                : "MAC全零(仅云端)";
-            SimpleLogger.Log($"  {device.Name} ({device.DeviceId}): {status} | {macInfo}");
-        }
+        var needDiscovery = knownDevices.Count(d => string.IsNullOrEmpty(d.IpAddress) && d.HasLocalMac);
+        SimpleLogger.Log($"[Discovery] Start: {knownDevices.Count} devices, {needDiscovery} need IP, subnet={subnet ?? "none"}");
 
         // Step 1: Ping sweep + ARP
         if (!string.IsNullOrEmpty(subnet))
         {
-            SimpleLogger.Log($"Step 1: Ping sweeping {subnet}.1-254 (50 concurrent, 200ms timeout)...");
             await PingSweepAsync(subnet);
         }
 
         var arpTable = await GetArpTableAsync();
-        SimpleLogger.Log($"ARP table: {arpTable.Count} entries");
-        foreach (var entry in arpTable)
-        {
-            SimpleLogger.Log($"  ARP: {entry.Key} -> {entry.Value}");
-        }
 
         // Step 2: MAC matching
-        SimpleLogger.Log("Step 2: MAC matching...");
-        // 跟踪已分配的 IP，防止重复分配给多个设备
         var assignedIps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        // 先收集已有的 IP 分配
         foreach (var device in knownDevices)
         {
             if (!string.IsNullOrEmpty(device.IpAddress))
-            {
                 assignedIps.Add(device.IpAddress);
-            }
         }
 
+        int matched = 0, notFound = 0;
         foreach (var device in knownDevices)
         {
-            if (!string.IsNullOrEmpty(device.IpAddress))
-            {
-                SimpleLogger.Log($"  {device.Name}: SKIP (already has IP={device.IpAddress})");
+            if (!string.IsNullOrEmpty(device.IpAddress) || !device.HasLocalMac)
                 continue;
-            }
-            if (!device.HasLocalMac)
-            {
-                SimpleLogger.Log($"  {device.Name}: SKIP (cloud-only device, no local MAC)");
-                continue;
-            }
 
             var effectiveMac = NormalizeMac(device.EffectiveMac);
-            var macSource = !string.IsNullOrEmpty(device.RealMacAddress) ? "RealMac" : "CloudMac";
-            SimpleLogger.Log($"  {device.Name}: Trying {macSource}={device.EffectiveMac} (normalized={effectiveMac})");
-
-            // 查找 MAC 匹配的 IP，且该 IP 未被其他设备占用
             var matchingEntry = arpTable.FirstOrDefault(e =>
                 NormalizeMac(e.Value).Equals(effectiveMac, StringComparison.OrdinalIgnoreCase) &&
                 !assignedIps.Contains(e.Key));
@@ -94,22 +61,14 @@ public class LanClient
             if (!string.IsNullOrEmpty(matchingEntry.Key))
             {
                 device.IpAddress = matchingEntry.Key;
-                assignedIps.Add(matchingEntry.Key);  // 标记为已占用
-                SimpleLogger.Log($"  {device.Name}: MATCHED -> {matchingEntry.Key}");
+                assignedIps.Add(matchingEntry.Key);
+                matched++;
             }
             else
             {
-                // 检查是否是因为 IP 已被占用
-                var macMatchButOccupied = arpTable.FirstOrDefault(e =>
-                    NormalizeMac(e.Value).Equals(effectiveMac, StringComparison.OrdinalIgnoreCase));
-                if (!string.IsNullOrEmpty(macMatchButOccupied.Key))
-                {
-                    SimpleLogger.Log($"  {device.Name}: MAC found but IP {macMatchButOccupied.Key} already assigned to another device");
-                }
-                else
-                {
-                    SimpleLogger.Log($"  {device.Name}: NOT FOUND in ARP table");
-                }
+                notFound++;
+                var macSource = !string.IsNullOrEmpty(device.RealMacAddress) ? "RealMac" : "CloudMac";
+                SimpleLogger.Log($"[Discovery] {device.Name}: {macSource} not found in ARP ({arpTable.Count} entries)");
             }
         }
 
@@ -118,27 +77,16 @@ public class LanClient
             string.IsNullOrEmpty(d.IpAddress) && d.IsOnline && d.HasLocalMac).ToList();
         if (stillUnmatched.Count > 0 && !string.IsNullOrEmpty(subnet))
         {
-            SimpleLogger.Log($"Step 3: TCP port scan ({stillUnmatched.Count} unmatched devices)...");
+            SimpleLogger.Log($"[Discovery] TCP scan for {stillUnmatched.Count} unmatched devices...");
             await TcpPortScanAsync(subnet, stillUnmatched);
         }
 
-        // Log cloud-only devices
-        var cloudOnly = knownDevices.Where(d => string.IsNullOrEmpty(d.IpAddress) && !d.HasLocalMac).ToList();
-        foreach (var device in cloudOnly)
-        {
-            SimpleLogger.Log($"  {device.Name}: 仅云端设备 (无本地API)");
-        }
+        SimpleLogger.Log($"[Discovery] Done: {matched} matched via ARP, {stillUnmatched.Count} via TCP");
 
         // Final summary
-        SimpleLogger.Log("===== Discovery Result =====");
-        foreach (var device in knownDevices)
-        {
-            var result = string.IsNullOrEmpty(device.IpAddress) ? "未找到" : device.IpAddress;
-            SimpleLogger.Log($"  {device.Name}: {result}");
-        }
         var foundCount = knownDevices.Count(d => !string.IsNullOrEmpty(d.IpAddress));
-        SimpleLogger.Log($"Total: {foundCount}/{knownDevices.Count} devices with IPs");
-        SimpleLogger.Log("===== Device Discovery End =====\n");
+        var cloudOnlyCount = knownDevices.Count(d => string.IsNullOrEmpty(d.IpAddress) && !d.HasLocalMac);
+        SimpleLogger.Log($"[Discovery] Result: {foundCount}/{knownDevices.Count} with IP, {cloudOnlyCount} cloud-only");
         return knownDevices;
     }
 
@@ -204,7 +152,6 @@ public class LanClient
                     if (reply.Status == IPStatus.Success)
                     {
                         Interlocked.Increment(ref successCount);
-                        SimpleLogger.Log($"  Ping OK: {ip} (TTL={reply.Options?.Ttl})");
                     }
                 }
                 catch { }
@@ -217,7 +164,6 @@ public class LanClient
 
         await Task.WhenAll(tasks);
         await Task.Delay(300);
-        SimpleLogger.Log($"Ping sweep done: {successCount}/254 responded");
     }
 
     private async Task<Dictionary<string, string>> GetArpTableAsync()
@@ -288,7 +234,6 @@ public class LanClient
         using var sem = new System.Threading.SemaphoreSlim(50);
         var openPorts = new System.Collections.Concurrent.ConcurrentBag<string>();
 
-        SimpleLogger.Log($"TCP: Scanning {subnet}.1-254:8081...");
         using var scanCts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(30));
         var portTasks = Enumerable.Range(1, 254).Select(i => $"{subnet}.{i}").Select(ip => Task.Run(async () =>
         {
@@ -305,7 +250,6 @@ public class LanClient
                 if (completedTask == connectTask && client.Connected)
                 {
                     openPorts.Add(ip);
-                    SimpleLogger.Log($"TCP: {ip}:8081 OPEN");
                 }
             }
             catch (OperationCanceledException)
@@ -321,15 +265,11 @@ public class LanClient
         }, scanCts.Token));
         await Task.WhenAll(portTasks);
 
-        SimpleLogger.Log($"TCP: Found {openPorts.Count} open ports (excluding {alreadyMatchedIps.Count} already matched)");
-
         if (openPorts.Count == 0) return;
 
         var claimedIps = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
         var probeTasks = new List<Task>();
         var probeSem = new System.Threading.SemaphoreSlim(5);
-
-        SimpleLogger.Log($"TCP: Probing {openPorts.Count} IPs with {unmatchedDevices.Count} devices...");
 
         foreach (var ip in openPorts)
         {
@@ -349,7 +289,6 @@ public class LanClient
                             if (claimedIps.TryAdd(ip, device.DeviceId))
                             {
                                 device.IpAddress = ip;
-                                SimpleLogger.Log($"TCP MATCHED: {device.Name} ({device.DeviceId}) -> {ip}");
                             }
                         }
                     }
@@ -361,9 +300,10 @@ public class LanClient
 
         await Task.WhenAll(probeTasks);
 
-        foreach (var device in unmatchedDevices.Where(d => string.IsNullOrEmpty(d.IpAddress)))
+        var stillUnmatchedCount = unmatchedDevices.Count(d => string.IsNullOrEmpty(d.IpAddress));
+        if (stillUnmatchedCount > 0)
         {
-            SimpleLogger.Log($"TCP: {device.Name} ({device.DeviceId}) could not be identified (cloud MAC may not match real MAC, no mDNS)");
+            SimpleLogger.Log($"[Discovery] TCP: {stillUnmatchedCount} devices could not be identified");
         }
     }
 
@@ -425,20 +365,13 @@ public class LanClient
                     try
                     {
                         var decrypted = AesCrypto.Decrypt(encryptedResponse, device.DeviceKey, responseIv);
-                        SimpleLogger.Log($"TCP probe: {ip} decrypted for {device.DeviceId}: {decrypted[..Math.Min(100, decrypted.Length)]}...");
                         return true;
                     }
                     catch
                     {
-                        SimpleLogger.Log($"TCP probe: {ip} decryption failed for {device.DeviceId} (wrong key)");
                         return false;
                     }
                 }
-            }
-
-            if (doc.RootElement.TryGetProperty("error", out var error) && error.GetInt32() == 0)
-            {
-                SimpleLogger.Log($"TCP probe: {ip} returned error:0 for {device.DeviceId} (no encrypted data to verify)");
             }
 
             return false;
@@ -476,9 +409,6 @@ public class LanClient
             iv
         };
 
-        SimpleLogger.Log($"LAN Control: {device.Name} -> {state}");
-        SimpleLogger.Log($"LAN Target: http://{device.IpAddress}:8081/zeroconf/switches");
-
         try
         {
             var requestJson = JsonSerializer.Serialize(requestBody);
@@ -491,49 +421,29 @@ public class LanClient
             };
 
             var response = await _http.SendAsync(request);
-
             var json = await response.Content.ReadAsStringAsync();
-            SimpleLogger.Log($"LAN Response: {json}");
 
             if (string.IsNullOrEmpty(json))
-            {
-                SimpleLogger.Log("LAN Response: Empty (assuming success)");
                 return true;
-            }
 
             using var doc = JsonDocument.Parse(json);
-            bool success;
             if (doc.RootElement.TryGetProperty("error", out var error))
-            {
-                var errorVal = error.GetInt32();
-                SimpleLogger.Log($"LAN Error Code: {errorVal}");
-                success = errorVal == 0;
-            }
-            else
-            {
-                success = true;
-            }
-
-            return success;
+                return error.GetInt32() == 0;
+            return true;
         }
         catch (HttpRequestException ex)
         {
-            SimpleLogger.Log($"LAN HTTP Error: {ex.Message}");
-            if (ex.InnerException != null)
-            {
-                SimpleLogger.Log($"LAN Inner Error: {ex.InnerException.Message}");
-            }
-
+            SimpleLogger.Log($"[LAN] {device.Name} HTTP error: {ex.Message}");
             return await SendViaSocketAsync(device, requestBody);
         }
         catch (TaskCanceledException)
         {
-            SimpleLogger.Log("LAN Timeout");
+            SimpleLogger.Log($"[LAN] {device.Name} timeout");
             return false;
         }
         catch (Exception ex)
         {
-            SimpleLogger.Log($"LAN Error: {ex.Message}");
+            SimpleLogger.Log($"[LAN] {device.Name} error: {ex.Message}");
             return false;
         }
     }
@@ -561,8 +471,6 @@ public class LanClient
             var bytesRead = await client.GetStream().ReadAsync(buffer, 0, buffer.Length);
             var response = Encoding.UTF8.GetString(buffer, 0, bytesRead);
 
-            SimpleLogger.Log($"Socket Response: {response}");
-
             if (response.StartsWith("HTTP/1.1 200") || response.StartsWith("HTTP/1.0 200"))
                 return true;
 
@@ -578,7 +486,7 @@ public class LanClient
         }
         catch (Exception ex)
         {
-            SimpleLogger.Log($"Socket Error: {ex.Message}");
+            SimpleLogger.Log($"[LAN] {device.Name} socket error: {ex.Message}");
             return false;
         }
     }
@@ -600,7 +508,6 @@ public class LanClient
     /// </summary>
     public Task<bool> RefreshDeviceStateAsync(DeviceInfo device)
     {
-        SimpleLogger.Log($"State query: LAN not supported for {device.Name} ({device.DeviceId}), use Cloud API");
         return Task.FromResult(false);
     }
 }

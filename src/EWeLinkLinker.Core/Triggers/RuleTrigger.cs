@@ -20,6 +20,7 @@ public sealed class RuleTrigger : IDisposable, IPostPollCallback
     private readonly ServiceLogger _logger;
     private readonly PollingScheduler _scheduler;
     private readonly List<OptimizedTriggerBase> _conditionTriggers = new();
+    private readonly object _evalLock = new();  // H-17 修复：保护 _previousCompositeResult 读写
     private bool _disposed;
     private bool _previousCompositeResult; // 防重复触发
 
@@ -54,6 +55,7 @@ public sealed class RuleTrigger : IDisposable, IPostPollCallback
 
     /// <summary>
     /// 轮询完成后评估复合条件（由 PollingScheduler 调用）
+    /// H-17 修复：使用 lock 保护 _previousCompositeResult 读写，防止并发竞态
     /// </summary>
     public void OnPollingComplete()
     {
@@ -63,33 +65,37 @@ public sealed class RuleTrigger : IDisposable, IPostPollCallback
 
         var states = string.Join(", ", _conditionTriggers.Select((t, i) =>
             $"{_rule.Conditions[i].Type}={t.State}"));
-        _logger.Info($"[RuleTrigger:{_rule.Name}] {states} => {(currentResult ? "满足" : "不满足")}, prev={_previousCompositeResult}");
+        _logger.Info($"[RuleTrigger:{_rule.Name}] {states} => {(currentResult ? "满足" : "不满足")}");
 
-        // 边沿检测：只在从"不满足"变为"满足"时触发
-        if (currentResult && !_previousCompositeResult)
+        // H-17 修复：lock 保护边沿检测逻辑
+        lock (_evalLock)
         {
-            var reason = string.Join(", ", _rule.Conditions.Select((c, i) =>
+            // 边沿检测：只在从"不满足"变为"满足"时触发
+            if (currentResult && !_previousCompositeResult)
             {
-                var state = _conditionTriggers[i].State == TriggerState.Triggered ? "满足" : "不满足";
-                return $"{c.Type}={c.Parameter}({state})";
-            }));
-
-            _logger.LogRuleTriggered(_rule.Name, reason);
-
-            _ = Task.Run(async () =>
-            {
-                try
+                var reason = string.Join(", ", _rule.Conditions.Select((c, i) =>
                 {
-                    await _linkerService.ExecuteRuleAsync(_rule);
-                }
-                catch (Exception ex)
+                    var state = _conditionTriggers[i].State == TriggerState.Triggered ? "满足" : "不满足";
+                    return $"{c.Type}={c.Parameter}({state})";
+                }));
+
+                _logger.LogRuleTriggered(_rule.Name, reason);
+
+                _ = Task.Run(async () =>
                 {
-                    _logger.Error($"规则 [{_rule.Name}] 执行失败", ex);
-                }
-            });
+                    try
+                    {
+                        await _linkerService.ExecuteRuleAsync(_rule).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Error($"规则 [{_rule.Name}] 执行失败", ex);
+                    }
+                });
+            }
+
+            _previousCompositeResult = currentResult;
         }
-
-        _previousCompositeResult = currentResult;
     }
 
     /// <summary>
