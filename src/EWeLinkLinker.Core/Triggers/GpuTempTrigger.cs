@@ -16,9 +16,14 @@ public class GpuTempTrigger : OptimizedTriggerBase
     private readonly string _parameter2;
     private readonly ComparisonOperator _comparison;
     private bool _wasTriggered;
-    private bool _gpuInitialized;  // 防止重复初始化
-    private IHardware? _gpuHardware;
-    private Computer? _computer;
+    private int _pollCount;
+
+    // 静态共享的 GPU 硬件实例（所有 GpuTempTrigger 共享）
+    private static Computer? _sharedComputer;
+    private static IHardware? _sharedGpu;
+    private static bool _gpuInitialized;
+    private static bool _gpuInitFailed;
+    private static readonly object _initLock = new();
 
     public override string Type => "gpu_temp";
     public override string DisplayName => "GPU温度";
@@ -51,64 +56,13 @@ public class GpuTempTrigger : OptimizedTriggerBase
         return true;
     }
 
-    protected override void OnStart()
-    {
-        try
-        {
-            InitializeGpu();
-        }
-        catch (Exception ex)
-        {
-            Log(TraceLevel.Warning, $"GPU 初始化失败: {ex.Message}");
-        }
-    }
-
-    private void InitializeGpu()
-    {
-        if (_gpuInitialized) return;  // 只初始化一次
-        _gpuInitialized = true;
-
-        try
-        {
-            _computer = new Computer { IsGpuEnabled = true };
-            _computer.Open();
-
-            foreach (var hardware in _computer.Hardware)
-            {
-                if (hardware.HardwareType == HardwareType.GpuNvidia
-                    || hardware.HardwareType == HardwareType.GpuAmd
-                    || hardware.HardwareType == HardwareType.GpuIntel)
-                {
-                    _gpuHardware = hardware;
-                    Log(TraceLevel.Info, $"检测到 GPU: {hardware.Name}");
-                    break;
-                }
-            }
-
-            if (_gpuHardware == null)
-            {
-                Log(TraceLevel.Warning, "未检测到支持的 GPU");
-            }
-        }
-        catch (Exception ex)
-        {
-            // H-8 修复：初始化失败时重置标志，下次 Start 可重试
-            Log(TraceLevel.Warning, $"GPU 初始化异常: {ex.Message}");
-            _gpuInitialized = false;
-            _computer?.Close();
-            _computer = null;
-        }
-    }
-
     protected override ValueTask<bool> EvaluateCoreAsync(CancellationToken ct)
     {
-        if (_gpuHardware == null)
-        {
-            InitializeGpu();
-            if (_gpuHardware == null) return ValueTask.FromResult(false);
-        }
+        // 使用传感器缓存（同一轮轮询中所有 GpuTempTrigger 共享同一个值）
+        var temp = SensorCache != null
+            ? SensorCache.GetOrCreate("gpu_temp", ReadGpuTemperature)
+            : ReadGpuTemperature();
 
-        var temp = GetGpuTemperature();
         if (float.IsNaN(temp)) return ValueTask.FromResult(false);
 
         var isTriggered = ComparisonHelper.Evaluate(temp, _parameter, _parameter2, _comparison);
@@ -136,53 +90,95 @@ public class GpuTempTrigger : OptimizedTriggerBase
         return ValueTask.FromResult(false);
     }
 
-    private int _pollCount;
-
-    private float GetGpuTemperature()
+    /// <summary>
+    /// 静态释放 GPU 硬件实例（由 PollingScheduler.DisposeAsync 调用）
+    /// </summary>
+    internal static void StaticDispose()
     {
-        if (_gpuHardware == null) return float.NaN;
+        lock (_initLock)
+        {
+            try { _sharedComputer?.Close(); } catch { }
+            try { (_sharedComputer as IDisposable)?.Dispose(); } catch { }
+            _sharedComputer = null;
+            _sharedGpu = null;
+            _gpuInitialized = false;
+            _gpuInitFailed = false;
+        }
+    }
+
+    private static void InitializeGpu()
+    {
+        try
+        {
+            _sharedComputer = new Computer { IsGpuEnabled = true };
+            _sharedComputer.Open();
+
+            foreach (var hardware in _sharedComputer.Hardware)
+            {
+                if (hardware.HardwareType == HardwareType.GpuNvidia
+                    || hardware.HardwareType == HardwareType.GpuAmd
+                    || hardware.HardwareType == HardwareType.GpuIntel)
+                {
+                    _sharedGpu = hardware;
+                    break;
+                }
+            }
+
+            if (_sharedGpu == null)
+            {
+                _gpuInitFailed = true;
+                EWeLinkLinker.Core.Logging.SimpleLogger.Log("[GPU] No supported GPU found");
+            }
+
+            _gpuInitialized = true;
+        }
+        catch (Exception ex)
+        {
+            _gpuInitFailed = true;
+            _gpuInitialized = true;
+            EWeLinkLinker.Core.Logging.SimpleLogger.Log($"[GPU] Initialization failed: {ex.Message}");
+        }
+    }
+
+    private static float ReadGpuTemperature()
+    {
+        // 在锁内获取引用，避免释放锁后被其他线程置为 null
+        IHardware? gpu;
+        lock (_initLock)
+        {
+            if (!_gpuInitialized && !_gpuInitFailed)
+                InitializeGpu();
+
+            gpu = _sharedGpu;
+        }
+
+        if (gpu == null) return float.NaN;
 
         try
         {
-            _gpuHardware.Update();
+            gpu.Update();
 
-            foreach (var sensor in _gpuHardware.Sensors)
+            foreach (var sensor in gpu.Sensors)
             {
                 if (sensor.SensorType == SensorType.Temperature && sensor.Value.HasValue)
                 {
                     if (sensor.Name.Contains("GPU", StringComparison.OrdinalIgnoreCase)
                         || sensor.Name.Contains("Core", StringComparison.OrdinalIgnoreCase))
-                    {
                         return sensor.Value.Value;
-                    }
                 }
             }
 
-            foreach (var sensor in _gpuHardware.Sensors)
+            foreach (var sensor in gpu.Sensors)
             {
                 if (sensor.SensorType == SensorType.Temperature && sensor.Value.HasValue)
-                {
                     return sensor.Value.Value;
-                }
             }
         }
         catch (Exception ex)
         {
-            Log(TraceLevel.Warning, $"读取 GPU 温度失败: {ex.Message}");
+            System.Diagnostics.Debug.WriteLine($"[GPU] Read temperature failed: {ex.Message}");
         }
 
         return float.NaN;
-    }
-
-    protected override void OnDispose()
-    {
-        _gpuHardware = null;
-        // 使用 Dispose 而非 Close，确保非托管资源释放
-        if (_computer != null)
-        {
-            _computer.Close();
-            (_computer as IDisposable)?.Dispose();
-            _computer = null;
-        }
     }
 }

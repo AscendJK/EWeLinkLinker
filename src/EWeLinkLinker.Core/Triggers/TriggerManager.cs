@@ -16,23 +16,26 @@ public sealed class TriggerManager : IAsyncDisposable
     private PollingScheduler? _scheduler;
     private bool _disposed;
 
-    public TriggerManager(LinkerService linkerService, string logPath)
+    public TriggerManager(LinkerService linkerService, string logPath, ServiceLogger logger)
     {
         _linkerService = linkerService;
-        _logger = new ServiceLogger(logPath);
+        _logger = logger;  // 使用传入的 logger，不创建新实例
         _logPath = logPath;
     }
 
     /// <summary>
     /// 加载规则并创建触发器
     /// </summary>
-    public async ValueTask LoadRulesAsync(List<LinkerRule> rules)
+    /// <param name="rules">规则列表</param>
+    /// <param name="pollingIntervalSeconds">轮询间隔（秒）</param>
+    public async ValueTask LoadRulesAsync(List<LinkerRule> rules, int pollingIntervalSeconds = 5)
     {
         // 清理旧触发器
         await ClearTriggersAsync();
 
-        // 创建调度器
-        _scheduler = new PollingScheduler(_logger, TimeSpan.FromSeconds(5));
+        // 创建调度器（使用配置的轮询间隔）
+        var interval = TimeSpan.FromSeconds(Math.Clamp(pollingIntervalSeconds, 1, 30));
+        _scheduler = new PollingScheduler(_logger, interval);
 
         int activeRules = 0;
         int totalConditions = 0;
@@ -124,7 +127,9 @@ public sealed class TriggerManager : IAsyncDisposable
     /// <summary>
     /// 重新加载配置
     /// </summary>
-    public async Task ReloadAsync(List<LinkerRule> newRules)
+    /// <param name="newRules">新规则列表</param>
+    /// <param name="pollingIntervalSeconds">轮询间隔（秒）</param>
+    public async Task ReloadAsync(List<LinkerRule> newRules, int pollingIntervalSeconds = 5)
     {
         try
         {
@@ -140,8 +145,8 @@ public sealed class TriggerManager : IAsyncDisposable
             }
             _ruleTriggers.Clear();
 
-            // 加载新规则
-            await LoadRulesAsync(newRules);
+            // 加载新规则（使用配置的轮询间隔）
+            await LoadRulesAsync(newRules, pollingIntervalSeconds);
 
             // 启动监控
             await StartAllAsync();
@@ -165,7 +170,7 @@ public sealed class TriggerManager : IAsyncDisposable
         };
     }
 
-    private static bool IsPowerCondition(string type) =>
+    public static bool IsPowerCondition(string type) =>
         type.Equals("boot", StringComparison.OrdinalIgnoreCase) ||
         type.Equals("shutdown", StringComparison.OrdinalIgnoreCase) ||
         type.Equals("sleep", StringComparison.OrdinalIgnoreCase) ||

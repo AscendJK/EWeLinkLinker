@@ -28,6 +28,8 @@ public sealed class PollingScheduler : IAsyncDisposable
     private readonly ServiceLogger _logger;
     private readonly SemaphoreSlim _semaphore;  // C-1 修复：构造函数初始化，避免竞态
     private int _isPolling;  // H-4 修复：防止重叠执行
+    private Task? _currentPollTask;  // 当前正在执行的轮询任务（Dispose 时等待）
+    private readonly SensorCache _sensorCache = new();  // 传感器缓存，每轮清空
 
     public PollingScheduler(ServiceLogger logger, TimeSpan? baseInterval = null)
     {
@@ -41,6 +43,7 @@ public sealed class PollingScheduler : IAsyncDisposable
         lock (_lock)
         {
             _triggers[trigger.Id] = trigger;
+            trigger.SensorCache = _sensorCache;  // 注入传感器缓存
             // 如果已经在运行，立即启动新注册的触发器
             if (_isRunning)
             {
@@ -140,28 +143,45 @@ public sealed class PollingScheduler : IAsyncDisposable
         }
     }
 
-    private async Task PollAllAsync()
+    private Task PollAllAsync()
     {
-        if (_disposed) return;
+        if (_disposed) return Task.CompletedTask;
 
         // H-4 修复：防止重叠执行。如果上次轮询还未完成，直接跳过本次
         if (Interlocked.CompareExchange(ref _isPolling, 1, 0) != 0)
         {
-            return;
+            return Task.CompletedTask;
         }
 
-        try
+        // 启动轮询任务并保存引用（Dispose 时等待）
+        var task = Task.Run(async () =>
         {
-            await PollAllCoreAsync();
-        }
-        finally
-        {
-            Interlocked.Exchange(ref _isPolling, 0);
-        }
+            try
+            {
+                await PollAllCoreAsync();
+            }
+            catch (Exception ex)
+            {
+                // 捕获轮询异常，防止任务崩溃导致后续轮询停止
+                _logger.Error($"轮询异常: {ex.Message}");
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _isPolling, 0);
+            }
+        });
+
+        _currentPollTask = task;
+        return task;
     }
 
     private async Task PollAllCoreAsync()
     {
+        var pollStart = DateTime.UtcNow;
+
+        // 每轮开始时清空传感器缓存（所有传感器只读一次）
+        _sensorCache.Clear();
+
         // 在锁内复制引用到局部变量，避免闭包捕获字段
         // 注意：只复制引用（struct copy），不创建新集合，减少 GC 压力
         OptimizedTriggerBase[] triggerArray;
@@ -174,6 +194,25 @@ public sealed class PollingScheduler : IAsyncDisposable
             callbackArray = new IPostPollCallback[_postPollCallbacks.Count];
             _postPollCallbacks.CopyTo(callbackArray, 0);
         }
+
+        // 统计本轮涉及的传感器类型（用于日志）
+        var sensorTypes = new HashSet<string>();
+        foreach (var trigger in triggerArray)
+        {
+            switch (trigger.Type)
+            {
+                case "cpu_temp": sensorTypes.Add("CPU温度"); break;
+                case "cpu_usage": sensorTypes.Add("CPU使用率"); break;
+                case "gpu_temp": sensorTypes.Add("GPU温度"); break;
+                case "app_start":
+                case "app_close":
+                    sensorTypes.Add("进程"); break;
+                case "time": sensorTypes.Add("时间"); break;
+                case "interval": sensorTypes.Add("间隔"); break;
+            }
+        }
+        string sensors = sensorTypes.Count > 0 ? string.Join(", ", sensorTypes) : "无";
+        _logger.Info($"[轮询] 触发器: {triggerArray.Length}, 传感器: [{sensors}]");
 
         if (triggerArray.Length == 0) return;
 
@@ -219,6 +258,13 @@ public sealed class PollingScheduler : IAsyncDisposable
                 _logger.Error("轮询后回调异常", ex);
             }
         }
+
+        // 性能监控：轮询耗时过长时记录警告
+        var elapsed = DateTime.UtcNow - pollStart;
+        if (elapsed > TimeSpan.FromSeconds(3))
+        {
+            _logger.Warn($"轮询周期耗时过长: {elapsed.TotalMilliseconds:F0}ms, 触发器数量: {triggerArray.Length}");
+        }
     }
 
     public async ValueTask DisposeAsync()
@@ -226,8 +272,21 @@ public sealed class PollingScheduler : IAsyncDisposable
         if (_disposed) return;
         _disposed = true;
         Stop();
+
+        // C-2 修复：等待当前轮询完成，避免释放正在使用的资源
+        if (_currentPollTask != null)
+        {
+            try { await _currentPollTask.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false); }
+            catch { /* 超时或异常继续释放 */ }
+        }
+
+        // C-3 修复：先清空缓存（释放 Process[] 等），再释放静态硬件句柄
+        _sensorCache.Clear();
+        GpuTempTrigger.StaticDispose();
+        CpuUsageTrigger.StaticDispose();
         _triggers.Clear();
         _postPollCallbacks.Clear();
         _semaphore.Dispose();
+        _currentPollTask = null;
     }
 }

@@ -48,7 +48,7 @@ public class AppStartTrigger : OptimizedTriggerBase
         lock (_knownProcesses)
         {
             _knownProcesses.Clear();
-            var existing = FindMatchingProcessIds(_processName);
+            var existing = FindMatchingProcessIds(_processName, SensorCache);
             foreach (var id in existing)
             {
                 _knownProcesses.Add(id);
@@ -60,7 +60,8 @@ public class AppStartTrigger : OptimizedTriggerBase
     {
         lock (_knownProcesses)
         {
-            var currentIds = FindMatchingProcessIds(_processName);
+            // 传入 SensorCache，同一轮轮询中共享 Process[] 数组
+            var currentIds = FindMatchingProcessIds(_processName, SensorCache);
 
             foreach (var id in currentIds)
             {
@@ -79,11 +80,26 @@ public class AppStartTrigger : OptimizedTriggerBase
     }
 
     /// <summary>
-    /// 智能匹配进程 - 返回匹配进程的 ID 列表（H-7 修复：不返回 Process 对象，避免访问已 Dispose 的对象）
+    /// 智能匹配进程 - 返回匹配进程的 ID 列表
+    /// 支持传感器缓存，同一轮轮询中所有 AppTrigger 共享同一个 Process[] 数组
     /// </summary>
-    public static List<int> FindMatchingProcessIds(string config)
+    /// <param name="config">进程名配置</param>
+    /// <param name="cache">传感器缓存（可为 null，为 null 时独立读取）</param>
+    public static List<int> FindMatchingProcessIds(string config, SensorCache? cache = null)
     {
-        var allProcesses = Process.GetProcesses();
+        // 从缓存获取 Process[] 数组，或独立读取
+        Process[] allProcesses;
+        bool ownsProcesses = cache == null;
+
+        if (cache != null)
+        {
+            allProcesses = cache.GetOrCreate("processes", () => Process.GetProcesses());
+        }
+        else
+        {
+            allProcesses = Process.GetProcesses();
+        }
+
         var matchedIds = new HashSet<int>();
         try
         {
@@ -132,10 +148,13 @@ public class AppStartTrigger : OptimizedTriggerBase
         }
         finally
         {
-            // 释放所有 Process 句柄
-            foreach (var p in allProcesses)
+            // 只有独立读取时才释放 Process 句柄（缓存的由 SensorCache.Clear() 统一释放）
+            if (ownsProcesses)
             {
-                try { p.Dispose(); } catch { }
+                foreach (var p in allProcesses)
+                {
+                    try { p.Dispose(); } catch { }
+                }
             }
         }
     }
@@ -280,7 +299,7 @@ public class AppCloseTrigger : OptimizedTriggerBase
         lock (_trackedProcesses)
         {
             _trackedProcesses.Clear();
-            var existing = AppStartTrigger.FindMatchingProcessIds(_processName);
+            var existing = AppStartTrigger.FindMatchingProcessIds(_processName, SensorCache);
             foreach (var id in existing)
             {
                 _trackedProcesses.Add(id);
@@ -292,7 +311,7 @@ public class AppCloseTrigger : OptimizedTriggerBase
     {
         lock (_trackedProcesses)
         {
-            var currentIds = AppStartTrigger.FindMatchingProcessIds(_processName);
+            var currentIds = AppStartTrigger.FindMatchingProcessIds(_processName, SensorCache);
 
             // 检查哪些进程已退出
             var exited = _trackedProcesses.Where(id => !currentIds.Contains(id)).ToList();

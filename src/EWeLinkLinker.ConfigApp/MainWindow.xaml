@@ -190,6 +190,18 @@
                     <CheckBox x:Name="LoggingCheckBox" Content="日志" IsChecked="True"
                               VerticalAlignment="Center" Margin="0,0,6,0"
                               Checked="LoggingCheckBox_Checked" Unchecked="LoggingCheckBox_Unchecked"/>
+                    <TextBlock Text="轮询:" VerticalAlignment="Center" Margin="0,0,4,0"
+                               Foreground="{StaticResource TextSecondaryBrush}" FontSize="12"/>
+                    <ComboBox x:Name="PollingIntervalCombo" Width="60" VerticalAlignment="Center"
+                              SelectedIndex="3" Margin="0,0,6,0" SelectionChanged="PollingIntervalCombo_SelectionChanged">
+                        <ComboBoxItem Content="1s"/>
+                        <ComboBoxItem Content="2s"/>
+                        <ComboBoxItem Content="3s"/>
+                        <ComboBoxItem Content="5s"/>
+                        <ComboBoxItem Content="10s"/>
+                        <ComboBoxItem Content="15s"/>
+                        <ComboBoxItem Content="30s"/>
+                    </ComboBox>
                     <Button x:Name="OpenLogBtn" Content="📄" Style="{StaticResource IconButton}"
                             Click="OpenLog_Click" ToolTip="打开日志文件夹"/>
                 </StackPanel>

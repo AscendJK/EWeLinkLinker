@@ -15,6 +15,7 @@ public class CpuTempTrigger : OptimizedTriggerBase
     private readonly string _parameter2;
     private readonly ComparisonOperator _comparison;
     private bool _wasTriggered;
+    private int _pollCount;
 
     public override string Type => "cpu_temp";
     public override string DisplayName => "CPU温度";
@@ -49,7 +50,11 @@ public class CpuTempTrigger : OptimizedTriggerBase
 
     protected override ValueTask<bool> EvaluateCoreAsync(CancellationToken ct)
     {
-        var temp = GetCpuTemperature();
+        // 使用传感器缓存（同一轮轮询中所有 CpuTempTrigger 共享同一个值）
+        var temp = SensorCache != null
+            ? SensorCache.GetOrCreate("cpu_temp", ReadCpuTemperature)
+            : ReadCpuTemperature();
+
         if (float.IsNaN(temp))
         {
             if (!_loggedWmiError)
@@ -86,9 +91,8 @@ public class CpuTempTrigger : OptimizedTriggerBase
     }
 
     private bool _loggedWmiError;
-    private int _pollCount;
 
-    private static float GetCpuTemperature()
+    private static float ReadCpuTemperature()
     {
         try
         {
@@ -123,7 +127,11 @@ public class CpuUsageTrigger : OptimizedTriggerBase
     private readonly string _parameter2;
     private readonly ComparisonOperator _comparison;
     private bool _wasTriggered;
-    private PerformanceCounter? _counter;
+
+    // 静态共享 PerformanceCounter（所有 CpuUsageTrigger 共享，线程安全）
+    private static PerformanceCounter? _sharedCounter;
+    private static readonly object _counterLock = new();
+    private static bool _counterInitialized;
 
     public override string Type => "cpu_usage";
     public override string DisplayName => "CPU使用率";
@@ -156,24 +164,13 @@ public class CpuUsageTrigger : OptimizedTriggerBase
         return true;
     }
 
-    protected override void OnStart()
-    {
-        try
-        {
-            if (_counter == null)
-            {
-                _counter = new PerformanceCounter("Processor", "% Processor Time", "_Total");
-                _counter.NextValue();
-            }
-        }
-        catch { }
-    }
-
     protected override ValueTask<bool> EvaluateCoreAsync(CancellationToken ct)
     {
-        if (_counter == null) return ValueTask.FromResult(false);
+        // 使用传感器缓存（同一轮轮询中所有 CpuUsageTrigger 共享同一个值）
+        var usage = SensorCache != null
+            ? SensorCache.GetOrCreate("cpu_usage", ReadCpuUsage)
+            : ReadCpuUsage();
 
-        var usage = _counter.NextValue();
         var isTriggered = ComparisonHelper.Evaluate(usage, _parameter, _parameter2, _comparison);
 
         // 边沿检测：从未满足变为满足时触发，保持锁存直到条件消失
@@ -193,9 +190,40 @@ public class CpuUsageTrigger : OptimizedTriggerBase
         return ValueTask.FromResult(false);
     }
 
-    protected override void OnDispose()
+    /// <summary>
+    /// 线程安全地读取 CPU 使用率
+    /// </summary>
+    private static float ReadCpuUsage()
     {
-        _counter?.Dispose();
-        _counter = null;
+        lock (_counterLock)
+        {
+            try
+            {
+                if (!_counterInitialized)
+                {
+                    _sharedCounter = new PerformanceCounter("Processor", "% Processor Time", "_Total");
+                    _sharedCounter.NextValue();  // 首次调用返回 0，需要预热
+                    _counterInitialized = true;
+                }
+                return _sharedCounter?.NextValue() ?? 0f;
+            }
+            catch
+            {
+                return 0f;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 静态释放 PerformanceCounter（由 PollingScheduler.DisposeAsync 调用）
+    /// </summary>
+    internal static void StaticDispose()
+    {
+        lock (_counterLock)
+        {
+            try { _sharedCounter?.Dispose(); } catch { }
+            _sharedCounter = null;
+            _counterInitialized = false;
+        }
     }
 }

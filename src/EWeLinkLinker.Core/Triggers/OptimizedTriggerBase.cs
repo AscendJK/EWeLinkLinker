@@ -151,6 +151,12 @@ public abstract class OptimizedTriggerBase : ITrigger
     protected bool IsDisposed => _disposed;
 
     /// <summary>
+    /// 传感器缓存（由 PollingScheduler 在 Register 时注入）
+    /// 触发器通过此属性获取缓存的传感器值，避免重复读取
+    /// </summary>
+    internal SensorCache? SensorCache { get; set; }
+
+    /// <summary>
     /// 日志路径（由 TriggerManager 设置）
     /// </summary>
     private string? _logPath;

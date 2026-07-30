@@ -14,6 +14,16 @@ public class LinkerConfig
     public List<LinkerRule> Rules { get; set; } = new();
     public bool LoggingEnabled { get; set; } = true;
 
+    /// <summary>
+    /// 轮询间隔（秒），范围 1-30，默认 5
+    /// </summary>
+    private int _pollingIntervalSeconds = 5;
+    public int PollingIntervalSeconds
+    {
+        get => _pollingIntervalSeconds;
+        set => _pollingIntervalSeconds = Math.Clamp(value, 1, 30);
+    }
+
     // H-22/H-23 修复：DPAPI 加密辅助方法
     // M-4 修复：使用 LocalMachine 范围，使服务端（SYSTEM 账户）也能解密
     private static readonly byte[] Entropy = Encoding.UTF8.GetBytes("EWeLinkLinker_v1");

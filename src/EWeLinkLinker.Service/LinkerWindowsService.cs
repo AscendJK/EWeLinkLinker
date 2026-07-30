@@ -58,6 +58,10 @@ public class LinkerWindowsService : ServiceBase
 
     protected override void OnStart(string[] args)
     {
+        // 调试输出：确认服务启动（写入控制台和调试输出）
+        Console.WriteLine($"[DEBUG] EWeLink Linker Service starting...");
+        System.Diagnostics.Debug.WriteLine($"[DEBUG] EWeLink Linker Service starting...");
+
         Log("========================================");
         Log($"EWeLink Linker Service v1.2.0");
         Log($"Build: {GetType().Assembly.GetName().Version}");
@@ -106,16 +110,18 @@ public class LinkerWindowsService : ServiceBase
                 return;
             }
 
-            _triggerManager = new TriggerManager(service, _logPath);
+            _triggerManager = new TriggerManager(service, _logPath, _logger);
 
-            // 异步加载和启动
+            // 异步加载和启动（使用配置的轮询间隔）
+            int pollingInterval = config.PollingIntervalSeconds;
+            int activeTriggerCount = config.Rules.Sum(r => r.Conditions.Count(c => !TriggerManager.IsPowerCondition(c.Type)));
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    await _triggerManager.LoadRulesAsync(config.Rules);
+                    await _triggerManager.LoadRulesAsync(config.Rules, pollingInterval);
                     await _triggerManager.StartAllAsync();
-                    Log($"Trigger manager started with {config.Rules.Count(r => !IsPowerEvent(r.Event))} triggers");
+                    Log($"Trigger manager started with {activeTriggerCount} triggers, polling interval: {pollingInterval}s");
                 }
                 catch (Exception ex)
                 {
@@ -214,9 +220,9 @@ public class LinkerWindowsService : ServiceBase
         InitializeClients();
 
         // 使用 TriggerManager.ReloadAsync 正确停止旧触发器并加载新触发器
-        await _triggerManager.ReloadAsync(config.Rules);
+        await _triggerManager.ReloadAsync(config.Rules, config.PollingIntervalSeconds);
 
-        Log($"Config reloaded: {config.Rules.Count} rules");
+        Log($"Config reloaded: {config.Rules.Count} rules, polling interval: {config.PollingIntervalSeconds}s");
     }
 
     /// <summary>
@@ -276,7 +282,7 @@ public class LinkerWindowsService : ServiceBase
         // 释放日志后台写入任务
         try
         {
-            _logger.DisposeAsync().ConfigureAwait(false).GetAwaiter().GetResult();
+            _logger.Dispose();
         }
         catch { }
 

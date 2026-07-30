@@ -1149,6 +1149,31 @@ public partial class MainWindow : Window, IDisposable
         LoggingCheckBox_Checked(sender, e);
     }
 
+    /// <summary>
+    /// 轮询间隔选择改变
+    /// </summary>
+    private void PollingIntervalCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        try
+        {
+            int[] intervals = { 1, 2, 3, 5, 10, 15, 30 };
+            int index = PollingIntervalCombo.SelectedIndex;
+            if (index < 0 || index >= intervals.Length) return;
+
+            int newInterval = intervals[index];
+            var config = LinkerConfig.Load(_configPath);
+            config.PollingIntervalSeconds = newInterval;
+            config.Save(_configPath);
+
+            // 配置文件变更会触发服务端的 FileSystemWatcher 自动重载
+            Log($"轮询间隔已改为 {newInterval} 秒");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"保存轮询间隔失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
     private void OpenLog_Click(object sender, RoutedEventArgs e)
     {
         try
@@ -1361,11 +1386,16 @@ public partial class MainWindow : Window, IDisposable
             RemoveServiceBtn.IsEnabled = false;
         }
 
-        // 同步日志开关状态
+        // 同步日志开关状态和轮询间隔
         try
         {
             var config = LinkerConfig.Load(_configPath);
             LoggingCheckBox.IsChecked = config.LoggingEnabled;
+
+            // 同步轮询间隔下拉框
+            int[] intervals = { 1, 2, 3, 5, 10, 15, 30 };
+            int index = Array.IndexOf(intervals, config.PollingIntervalSeconds);
+            PollingIntervalCombo.SelectedIndex = index >= 0 ? index : 3; // 默认 5s
         }
         catch { }
     }
