@@ -20,6 +20,10 @@
 
 ### 1. 构建项目
 
+**环境要求：**
+- [.NET 10.0 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)（必需，**不支持 .NET 8/9 及更低版本**）
+- Windows 10/11（Windows Service + WPF 需要）
+
 ```bash
 # 双击执行
 build-all.bat
