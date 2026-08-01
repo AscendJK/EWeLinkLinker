@@ -170,7 +170,7 @@ public class CloudClient
         return Encoding.UTF8.GetString(stream.ToArray());
     }
 
-    public async Task<List<DeviceInfo>> GetDevicesAsync(string accessToken)
+    public async Task<List<DeviceInfo>> GetDevicesAsync(string accessToken, int maxDevices = 200)
     {
         var url = $"{BaseUrl}/v2/device/thing?num=0";
 

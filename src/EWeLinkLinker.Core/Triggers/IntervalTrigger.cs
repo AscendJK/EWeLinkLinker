@@ -11,6 +11,7 @@ public class IntervalTrigger : OptimizedTriggerBase
 {
     private readonly int _intervalMinutes;
     private DateTime _lastTriggered;
+    private bool _wasTriggered;
 
     public override string Type => "interval";
     public override string DisplayName => "间隔执行";
@@ -31,6 +32,7 @@ public class IntervalTrigger : OptimizedTriggerBase
     {
         // H-18 修复：每次 Start 时重置计时器
         _lastTriggered = DateTime.Now;
+        _wasTriggered = false;
     }
 
     public override bool ValidateParameter(string parameter, out string? errorMessage)
@@ -54,8 +56,20 @@ public class IntervalTrigger : OptimizedTriggerBase
         var elapsed = DateTime.Now - _lastTriggered;
         if (elapsed.TotalMinutes >= _intervalMinutes)
         {
-            _lastTriggered = DateTime.Now;
-            return ValueTask.FromResult(true);
+            if (!_wasTriggered)
+            {
+                _wasTriggered = true;
+                _lastTriggered = DateTime.Now;
+                return ValueTask.FromResult(true);
+            }
+            return ValueTask.FromResult(false);
+        }
+
+        // 条件不满足，复位锁存和状态
+        if (_wasTriggered)
+        {
+            _wasTriggered = false;
+            State = TriggerState.Monitoring;
         }
         return ValueTask.FromResult(false);
     }

@@ -47,7 +47,7 @@ public static class SimpleLogger
                 {
                     var dir = Path.GetDirectoryName(_logPath);
                     if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-                    var stream = new FileStream(_logPath, FileMode.Append, FileAccess.Write, FileShare.Read,
+                    var stream = new FileStream(_logPath, FileMode.Append, FileAccess.Write, FileShare.Read | FileShare.Delete,
                         bufferSize: 4096, useAsync: false);
                     _writer = new StreamWriter(stream) { AutoFlush = true };
                 }
@@ -78,7 +78,7 @@ public static class SimpleLogger
                 {
                     var dir = Path.GetDirectoryName(_logPath);
                     if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-                    var stream = new FileStream(_logPath, FileMode.Append, FileAccess.Write, FileShare.Read,
+                    var stream = new FileStream(_logPath, FileMode.Append, FileAccess.Write, FileShare.Read | FileShare.Delete,
                         bufferSize: 4096, useAsync: false);
                     _writer = new StreamWriter(stream) { AutoFlush = true };
                 }
@@ -110,10 +110,13 @@ public static class SimpleLogger
             {
                 var backupPath = _logPath + ".old";
                 if (File.Exists(backupPath)) File.Delete(backupPath);
+                // H-? 修复：先释放 writer 句柄再移动文件，防止 FILE_SHARE_DELETE 不足时 MoveTo 失败
+                _writer?.Dispose();
+                _writer = null;
                 fi.MoveTo(backupPath);
             }
         }
-        catch (Exception) { /* H-10 修复：不吞致命异常 */ }
+        catch (Exception) { }
     }
 }
 

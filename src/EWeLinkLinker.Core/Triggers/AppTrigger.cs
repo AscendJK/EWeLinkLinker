@@ -12,6 +12,7 @@ public class AppStartTrigger : OptimizedTriggerBase
 {
     private readonly string _processName;
     private readonly HashSet<int> _knownProcesses = new();
+    private bool _wasTriggered;
 
     public override string Type => "app_start";
     public override string DisplayName => "应用启动";
@@ -45,6 +46,7 @@ public class AppStartTrigger : OptimizedTriggerBase
 
     protected override void OnStart()
     {
+        _wasTriggered = false;
         lock (_knownProcesses)
         {
             _knownProcesses.Clear();
@@ -63,17 +65,32 @@ public class AppStartTrigger : OptimizedTriggerBase
             // 传入 SensorCache，同一轮轮询中共享 Process[] 数组
             var currentIds = FindMatchingProcessIds(_processName, SensorCache);
 
+            var hasNewProcess = false;
             foreach (var id in currentIds)
             {
                 if (!_knownProcesses.Contains(id))
                 {
                     _knownProcesses.Add(id);
-                    return ValueTask.FromResult(true);
+                    hasNewProcess = true;
                 }
             }
 
             // 清理已退出的进程
             _knownProcesses.RemoveWhere(id => !currentIds.Contains(id));
+
+            // 边沿检测：发现了新进程且未触发过
+            if (hasNewProcess && !_wasTriggered)
+            {
+                _wasTriggered = true;
+                return ValueTask.FromResult(true);
+            }
+
+            // 没有新进程，复位锁存和状态
+            if (!hasNewProcess && _wasTriggered)
+            {
+                _wasTriggered = false;
+                State = TriggerState.Monitoring;
+            }
         }
 
         return ValueTask.FromResult(false);
@@ -263,6 +280,7 @@ public class AppCloseTrigger : OptimizedTriggerBase
 {
     private readonly string _processName;
     private readonly HashSet<int> _trackedProcesses = new();
+    private bool _wasTriggered;
 
     public override string Type => "app_close";
     public override string DisplayName => "应用关闭";
@@ -296,6 +314,7 @@ public class AppCloseTrigger : OptimizedTriggerBase
 
     protected override void OnStart()
     {
+        _wasTriggered = false;
         lock (_trackedProcesses)
         {
             _trackedProcesses.Clear();
@@ -315,21 +334,26 @@ public class AppCloseTrigger : OptimizedTriggerBase
 
             // 检查哪些进程已退出
             var exited = _trackedProcesses.Where(id => !currentIds.Contains(id)).ToList();
-            if (exited.Count > 0)
-            {
-                // 更新跟踪列表
-                _trackedProcesses.RemoveWhere(id => !currentIds.Contains(id));
-                foreach (var id in currentIds)
-                {
-                    _trackedProcesses.Add(id);
-                }
-                return ValueTask.FromResult(true);
-            }
 
             // 更新跟踪列表
+            _trackedProcesses.RemoveWhere(id => !currentIds.Contains(id));
             foreach (var id in currentIds)
             {
                 _trackedProcesses.Add(id);
+            }
+
+            // 边沿检测：有进程退出且未触发过
+            if (exited.Count > 0 && !_wasTriggered)
+            {
+                _wasTriggered = true;
+                return ValueTask.FromResult(true);
+            }
+
+            // 没有进程退出，复位锁存和状态
+            if (exited.Count == 0 && _wasTriggered)
+            {
+                _wasTriggered = false;
+                State = TriggerState.Monitoring;
             }
         }
 

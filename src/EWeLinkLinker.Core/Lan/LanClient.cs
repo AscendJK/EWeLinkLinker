@@ -114,7 +114,9 @@ public class LanClient
                     if (addr.Address.AddressFamily != AddressFamily.InterNetwork) continue;
 
                     var ip = addr.Address.ToString();
-                    if (ip.StartsWith("169.254.") || ip.StartsWith("192.168.80.") || ip.StartsWith("192.168.84."))
+                    // H-? 修复：仅排除已知的虚拟网卡段，不再硬编码排除 192.168.80/84
+                    // 同时保留 169.254.x.x APIPA 段的排除
+                    if (ip.StartsWith("169.254."))
                         continue;
 
                     var parts = ip.Split('.');
@@ -181,7 +183,6 @@ public class LanClient
                     RedirectStandardOutput = true,
                     UseShellExecute = false,
                     CreateNoWindow = true,
-                    // 修复：确保使用 UTF-8 编码支持中文系统
                     StandardOutputEncoding = Encoding.UTF8
                 }
             };
@@ -196,9 +197,6 @@ public class LanClient
                 var trimmed = line.Trim();
                 if (string.IsNullOrEmpty(trimmed)) continue;
 
-                // 修复：兼容中英文 ARP 表头
-                // 中文: "接口: 192.168.1.1 --- 0x..."
-                // 英文: "Interface: 192.168.1.1 --- 0x..."
                 if (trimmed.StartsWith("Interface") || trimmed.StartsWith("接口")
                     || trimmed.StartsWith("Internet")) continue;
 
@@ -206,7 +204,6 @@ public class LanClient
                 if (parts.Length >= 2)
                 {
                     var ip = parts[0];
-                    // MAC 地址可能是 xx-xx-xx-xx-xx-xx 或 xx:xx:xx:xx:xx:xx 格式
                     var mac = parts[1].Replace("-", ":").Replace(".", ":");
 
                     if (IPAddress.TryParse(ip, out var parsed) &&
@@ -243,7 +240,6 @@ public class LanClient
             try
             {
                 client = new TcpClient();
-                // 修复：使用 scanCts.Token 取消连接
                 var connectTask = client.ConnectAsync(ip, 8081, scanCts.Token).AsTask();
                 var delayTask = Task.Delay(300, scanCts.Token);
                 var completedTask = await Task.WhenAny(connectTask, delayTask);
@@ -252,10 +248,7 @@ public class LanClient
                     openPorts.Add(ip);
                 }
             }
-            catch (OperationCanceledException)
-            {
-                // 取消时正常退出
-            }
+            catch (OperationCanceledException) { }
             catch { }
             finally
             {
@@ -344,13 +337,14 @@ public class LanClient
             var bytes = Encoding.UTF8.GetBytes(request);
             await client.GetStream().WriteAsync(bytes, 0, bytes.Length);
 
-            var buffer = new byte[4096];
-            var bytesRead = await client.GetStream().ReadAsync(buffer, 0, buffer.Length);
-            var response = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+            // H-? 修复：循环读取完整 HTTP 响应，避免 TCP 分段截断
+            var fullResponse = await ReadHttpResponseAsync(client);
+            if (fullResponse == null) return false;
 
-            var bodyStart = response.IndexOf("\r\n\r\n");
+            var bodyStart = fullResponse.IndexOf("\r\n\r\n");
             if (bodyStart < 0) return false;
-            var body = response[(bodyStart + 4)..].Trim();
+            var body = fullResponse[(bodyStart + 4)..].Trim();
+            if (string.IsNullOrEmpty(body)) return false;
 
             using var doc = JsonDocument.Parse(body);
 
@@ -358,17 +352,34 @@ public class LanClient
                 doc.RootElement.TryGetProperty("data", out var dataProp))
             {
                 var responseIv = doc.RootElement.TryGetProperty("iv", out var ivProp) ? ivProp.GetString() ?? "" : "";
-                var encryptedResponse = dataProp.GetString() ?? "";
+                var encrypted = dataProp.GetString() ?? "";
 
-                if (!string.IsNullOrEmpty(encryptedResponse) && !string.IsNullOrEmpty(responseIv))
+                if (!string.IsNullOrEmpty(encrypted) && !string.IsNullOrEmpty(responseIv))
                 {
+                    string decryptedJson;
                     try
                     {
-                        var decrypted = AesCrypto.Decrypt(encryptedResponse, device.DeviceKey, responseIv);
-                        return true;
+                        decryptedJson = AesCrypto.Decrypt(encrypted, device.DeviceKey, responseIv);
                     }
                     catch
                     {
+                        // 解密失败 → 该 IP 不是此设备
+                        return false;
+                    }
+
+                    // H-? 修复：额外验证解密后的 JSON 中包含目标 deviceid
+                    // 防止不同设备巧合通过 PKCS7 padding 校验（概率约 1/256）
+                    try
+                    {
+                        // 解析 JSON 验证 deviceid 精确匹配，防止 Contains 假阳性
+                        using var decryptedDoc = JsonDocument.Parse(decryptedJson);
+                        if (decryptedDoc.RootElement.TryGetProperty("deviceid", out var did) &&
+                            did.GetString() == device.DeviceId)
+                            return true;
+                    }
+                    catch
+                    {
+                        // 解密后内容非合法 JSON → 不是此设备
                         return false;
                     }
                 }
@@ -383,6 +394,75 @@ public class LanClient
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// H-? 修复：循环读取 TCP 流直到获取完整 HTTP 响应。
+    /// 防止 TCP 分段 + 4096 缓冲区不够导致截断。
+    /// 支持 Content-Length 模式，没有 Content-Length 时读取到连接关闭。
+    /// </summary>
+    private static async Task<string?> ReadHttpResponseAsync(TcpClient client)
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        var stream = client.GetStream();
+        var buffer = new byte[16384]; // 16KB 缓冲区，减少循环读取次数
+        var sb = new StringBuilder();
+        int contentLength = -1;
+
+        // 循环读取，从头部开始
+        while (true)
+        {
+            var bytesRead = await stream.ReadAsync(buffer, cts.Token);
+            if (bytesRead == 0) return sb.Length > 0 ? sb.ToString() : null;
+
+            sb.Append(Encoding.UTF8.GetString(buffer, 0, bytesRead));
+            var current = sb.ToString();
+
+            if (contentLength < 0)
+            {
+                var headerEnd = current.IndexOf("\r\n\r\n");
+                if (headerEnd < 0)
+                {
+                    if (sb.Length > 16384) return null; // 头部太大，防畸形响应
+                    continue;
+                }
+
+                // 解析 Content-Length
+                var headers = current[..headerEnd];
+                foreach (var line in headers.Split('\n'))
+                {
+                    var trimmed = line.Trim();
+                    if (trimmed.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int.TryParse(trimmed["Content-Length:".Length..].Trim(), out contentLength);
+                    }
+                }
+            }
+
+            if (contentLength > 0)
+            {
+                var bodyOffset = current.IndexOf("\r\n\r\n") + 4;
+                var bodyRead = current.Length - bodyOffset;
+                if (bodyRead >= contentLength) break;
+
+                // 继续读身体
+                var remaining = contentLength - bodyRead;
+                var toRead = (int)Math.Min(remaining, buffer.Length);
+                bytesRead = await stream.ReadAsync(buffer, 0, toRead, cts.Token);
+                if (bytesRead == 0) break;
+                sb.Append(Encoding.UTF8.GetString(buffer, 0, bytesRead));
+            }
+            else
+            {
+                // 没有 Content-Length（Transfer-Encoding: chunked 或 Connection: close）
+                // 循环读直到连接关闭
+                var moreBytes = await stream.ReadAsync(buffer, cts.Token);
+                if (moreBytes == 0) break;
+                sb.Append(Encoding.UTF8.GetString(buffer, 0, moreBytes));
+            }
+        }
+
+        return sb.ToString();
     }
 
     public async Task<bool> SetPowerAsync(DeviceInfo device, bool turnOn, int outlet = 0)
@@ -423,8 +503,11 @@ public class LanClient
             var response = await _http.SendAsync(request);
             var json = await response.Content.ReadAsStringAsync();
 
+            // H-? 修复：区分 HTTP 路径和 Socket 路径的空响应语义。
+            // HttpClient 路径收到 HTTP 200（即使空 body）说明设备已接收请求，返回 true。
+            // Socket 路径的空响应由 ReadHttpResponseAsync 返回 null 处理。
             if (string.IsNullOrEmpty(json))
-                return true;
+                return true; // HTTP 200 空 body = 设备老固件不返回响应体，但已执行命令
 
             using var doc = JsonDocument.Parse(json);
             if (doc.RootElement.TryGetProperty("error", out var error))
@@ -453,7 +536,8 @@ public class LanClient
         try
         {
             using var client = new TcpClient();
-            await client.ConnectAsync(device.IpAddress, 8081);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await client.ConnectAsync(device.IpAddress, 8081, cts.Token);
 
             var requestJson = JsonSerializer.Serialize(requestBody);
             var httpRequest = $"POST /zeroconf/switches HTTP/1.1\r\n" +
@@ -465,23 +549,32 @@ public class LanClient
                               requestJson;
 
             var bytes = Encoding.UTF8.GetBytes(httpRequest);
-            await client.GetStream().WriteAsync(bytes, 0, bytes.Length);
+            await client.GetStream().WriteAsync(bytes, cts.Token);
 
-            var buffer = new byte[4096];
-            var bytesRead = await client.GetStream().ReadAsync(buffer, 0, buffer.Length);
-            var response = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+            // H-? 修复：使用 ReadHttpResponseAsync 循环读取完整响应
+            var fullResponse = await ReadHttpResponseAsync(client);
+            if (fullResponse == null) return false;
 
-            if (response.StartsWith("HTTP/1.1 200") || response.StartsWith("HTTP/1.0 200"))
-                return true;
-
-            var bodyStart = response.IndexOf("\r\n\r\n");
-            if (bodyStart >= 0)
+            if (fullResponse.StartsWith("HTTP/1.1 200") || fullResponse.StartsWith("HTTP/1.0 200"))
             {
-                var jsonBody = response[(bodyStart + 4)..].Trim();
-                if (jsonBody.Contains("\"error\":0") || jsonBody.Contains("\"error\": 0"))
-                    return true;
+                var bodyStart = fullResponse.IndexOf("\r\n\r\n");
+                if (bodyStart >= 0)
+                {
+                    var jsonBody = fullResponse[(bodyStart + 4)..].Trim();
+                    if (!string.IsNullOrEmpty(jsonBody) &&
+                        (jsonBody.Contains("\"error\":0") || jsonBody.Contains("\"error\": 0")))
+                        return true;
+                    if (string.IsNullOrEmpty(jsonBody)) return false;
+                    return true; // 200 但无 body，视为成功
+                }
+                return true;
             }
 
+            return false;
+        }
+        catch (OperationCanceledException)
+        {
+            SimpleLogger.Log($"[LAN] {device.Name} socket timeout");
             return false;
         }
         catch (Exception ex)

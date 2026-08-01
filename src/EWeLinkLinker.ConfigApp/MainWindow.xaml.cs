@@ -241,6 +241,21 @@ public partial class MainWindow : Window, IDisposable
             var rulesList = _rules.ToList();
             // 加载现有配置以保留 LoggingEnabled 等设置
             var existingConfig = LinkerConfig.Load(_configPath);
+
+            // 防止回写覆盖：如果磁盘 token 非空且与内存不同，说明被服务端 TokenManager 刷新过
+            // 优先用磁盘 token（服务端写入的新 token）
+            var accessToken = _accessToken;
+            var refreshToken = _refreshToken;
+            var userApiKey = _userApiKey;
+            if (!string.IsNullOrEmpty(existingConfig.Tokens.AccessToken)
+                && existingConfig.Tokens.AccessToken != _accessToken)
+            {
+                accessToken = existingConfig.Tokens.AccessToken;
+                refreshToken = existingConfig.Tokens.RefreshToken;
+                userApiKey = existingConfig.Tokens.UserApiKey;
+                Log("[保存] 检测到服务端已刷新 token，使用磁盘版本");
+            }
+
             var config = new LinkerConfig
             {
                 Account = new AccountConfig
@@ -252,9 +267,9 @@ public partial class MainWindow : Window, IDisposable
                 },
                 Tokens = new TokenConfig
                 {
-                    AccessToken = _accessToken,
-                    RefreshToken = _refreshToken,
-                    UserApiKey = _userApiKey
+                    AccessToken = accessToken,
+                    RefreshToken = refreshToken,
+                    UserApiKey = userApiKey
                 },
                 Devices = _allDevices,
                 Rules = rulesList,
@@ -288,7 +303,6 @@ public partial class MainWindow : Window, IDisposable
             {
                 var savedJson = File.ReadAllText(_configPath);
                 Log($"[保存] 文件大小: {savedJson.Length} 字符");
-                Log($"[保存] 文件内容前200字符: {savedJson[..Math.Min(200, savedJson.Length)]}");
             }
         }
         catch (Exception ex)
@@ -308,6 +322,9 @@ public partial class MainWindow : Window, IDisposable
         try
         {
             var existingConfig = LinkerConfig.Load(_configPath);
+
+            // 注意：此方法仅在登录成功后调用，内存 token 必定是最新的。
+            // 不添加 token 回写防护——否则登录后的新 token 会被磁盘旧 token 覆盖。
 
             // 优先使用内存中的设备列表（用户可能在 UI 上刚编辑过 RealMacAddress）
             var devicesToSave = _allDevices.Count > 0
@@ -1287,6 +1304,21 @@ public partial class MainWindow : Window, IDisposable
             {
                 await process.WaitForExitAsync();
                 Log($"sc.exe {arguments} -> 退出码 {process.ExitCode}");
+                // 检查退出码：0=成功，其他=失败
+                if (process.ExitCode != 0 && !suppressErrors)
+                {
+                    var errorDetail = process.ExitCode switch
+                    {
+                        1060 => "服务未安装",
+                        1056 => "服务已存在",
+                        1062 => "服务未启动",
+                        1058 => "服务已禁用",
+                        1072 => "服务标记为删除",
+                        _ => $"错误码 {process.ExitCode}"
+                    };
+                    if (!suppressErrors)
+                        MessageBox.Show($"sc.exe 操作失败: {errorDetail}\n命令: sc {arguments}", "服务控制失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
             }
         }
         catch (System.ComponentModel.Win32Exception)

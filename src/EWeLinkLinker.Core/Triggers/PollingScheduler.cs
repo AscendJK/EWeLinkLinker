@@ -276,7 +276,10 @@ public sealed class PollingScheduler : IAsyncDisposable
         // C-2 修复：等待当前轮询完成，避免释放正在使用的资源
         if (_currentPollTask != null)
         {
-            try { await _currentPollTask.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false); }
+            try { await _currentPollTask.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+            // 等待轮询完全停止
+            while (Interlocked.CompareExchange(ref _isPolling, 0, 0) != 0 && _disposed)
+                await Task.Delay(100).ConfigureAwait(false); }
             catch { /* 超时或异常继续释放 */ }
         }
 

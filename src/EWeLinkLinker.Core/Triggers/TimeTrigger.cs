@@ -12,6 +12,7 @@ public class TimeTrigger : OptimizedTriggerBase
     private readonly TimeSpan _time;
     private readonly ComparisonOperator _comparison;
     private DateTime _lastTriggeredDate;
+    private bool _wasTriggered;
 
     public override string Type => "time";
     public override string DisplayName => "每天固定时间";
@@ -25,6 +26,13 @@ public class TimeTrigger : OptimizedTriggerBase
 
         _time = TimeSpan.Parse(config.Parameter!);
         _comparison = config.Comparison;
+    }
+
+    protected override void OnStart()
+    {
+        // H-? 修复：Stop/Start 或热重载后复位锁存状态，确保当天可再次触发
+        _wasTriggered = false;
+        _lastTriggeredDate = DateTime.MinValue;
     }
 
     public override bool ValidateParameter(string parameter, out string? errorMessage)
@@ -49,14 +57,30 @@ public class TimeTrigger : OptimizedTriggerBase
         var today = now.Date;
 
         // 根据比较运算符判断
-        return _comparison switch
+        var triggered = _comparison switch
         {
-            ComparisonOperator.Eq => ValueTask.FromResult(EqCheck(now, today)),
-            ComparisonOperator.Neq => ValueTask.FromResult(NeqCheck(now, today)),
-            ComparisonOperator.Gte => ValueTask.FromResult(GteCheck(now, today)),
-            ComparisonOperator.Lt => ValueTask.FromResult(LtCheck(now, today)),
-            _ => ValueTask.FromResult(false)
+            ComparisonOperator.Eq => EqCheck(now, today),
+            ComparisonOperator.Neq => NeqCheck(now, today),
+            ComparisonOperator.Gte => GteCheck(now, today),
+            ComparisonOperator.Lt => LtCheck(now, today),
+            _ => false
         };
+
+        // 边沿检测：从未满足变为满足时触发
+        if (triggered && !_wasTriggered)
+        {
+            _wasTriggered = true;
+            return ValueTask.FromResult(true);
+        }
+
+        // 条件不满足，复位锁存和状态
+        if (!triggered && _wasTriggered)
+        {
+            _wasTriggered = false;
+            State = TriggerState.Monitoring;
+        }
+
+        return ValueTask.FromResult(false);
     }
 
     private bool EqCheck(DateTime now, DateTime today)

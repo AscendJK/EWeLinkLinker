@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -14,9 +15,6 @@ public class LinkerConfig
     public List<LinkerRule> Rules { get; set; } = new();
     public bool LoggingEnabled { get; set; } = true;
 
-    /// <summary>
-    /// 轮询间隔（秒），范围 1-30，默认 5
-    /// </summary>
     private int _pollingIntervalSeconds = 5;
     public int PollingIntervalSeconds
     {
@@ -24,13 +22,8 @@ public class LinkerConfig
         set => _pollingIntervalSeconds = Math.Clamp(value, 1, 30);
     }
 
-    // H-22/H-23 修复：DPAPI 加密辅助方法
-    // M-4 修复：使用 LocalMachine 范围，使服务端（SYSTEM 账户）也能解密
     private static readonly byte[] Entropy = Encoding.UTF8.GetBytes("EWeLinkLinker_v1");
 
-    /// <summary>
-    /// 加密敏感字符串（使用本机范围的 DPAPI，服务端和客户端均可解密）
-    /// </summary>
     internal static string Protect(string? plainText)
     {
         if (string.IsNullOrEmpty(plainText)) return string.Empty;
@@ -39,9 +32,6 @@ public class LinkerConfig
         return Convert.ToBase64String(encrypted);
     }
 
-    /// <summary>
-    /// 解密敏感字符串
-    /// </summary>
     internal static string Unprotect(string? cipherText)
     {
         if (string.IsNullOrEmpty(cipherText)) return string.Empty;
@@ -53,7 +43,6 @@ public class LinkerConfig
         }
         catch
         {
-            // 解密失败时返回原值（兼容未加密的旧配置）
             return cipherText;
         }
     }
@@ -62,18 +51,15 @@ public class LinkerConfig
     {
         WriteIndented = true,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() }
+        Converters = { new JsonStringEnumConverter() }
     };
 
-    // Use a dictionary of locks per file path to avoid blocking unrelated config files
-    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, object> PathLocks = new();
+    private static readonly ConcurrentDictionary<string, object> PathLocks = new();
 
     public static LinkerConfig Load(string path)
     {
         if (!File.Exists(path))
-        {
             return new LinkerConfig();
-        }
 
         try
         {
@@ -84,12 +70,8 @@ public class LinkerConfig
                 json = File.ReadAllText(path);
             }
             var config = JsonSerializer.Deserialize<LinkerConfig>(json, JsonOptions) ?? new LinkerConfig();
-            // 反序列化后验证所有设备数据
             foreach (var device in config.Devices)
-            {
                 device.Validate();
-            }
-            // 同步规则中的设备名称为配置中的最新名称
             SyncActionDeviceNames(config);
             return config;
         }
@@ -99,20 +81,16 @@ public class LinkerConfig
         }
         catch (JsonException ex)
         {
-            // H-11 修复：JSON 格式错误时记录日志但不静默吞掉
             System.Diagnostics.Debug.WriteLine($"Config JSON parse error: {ex.Message}");
-            throw new InvalidOperationException($"配置文件 JSON 格式错误: {Path.GetFileName(path)}", ex);
+            throw new InvalidOperationException($"Config file has invalid JSON: {Path.GetFileName(path)}", ex);
         }
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"Config load error: {ex.Message}");
-            throw new InvalidOperationException($"无法加载配置文件: {Path.GetFileName(path)}", ex);
+            throw new InvalidOperationException($"Cannot load config file: {Path.GetFileName(path)}", ex);
         }
     }
 
-    /// <summary>
-    /// 同步规则中的设备名称为配置中的最新名称
-    /// </summary>
     private static void SyncActionDeviceNames(LinkerConfig config)
     {
         foreach (var rule in config.Rules)
@@ -121,26 +99,47 @@ public class LinkerConfig
             {
                 var device = config.Devices.FirstOrDefault(d => d.DeviceId == action.DeviceId);
                 if (device != null && action.Name != device.Name)
-                {
                     action.Name = device.Name;
-                }
             }
         }
     }
 
-    /// <summary>
-    /// 保存配置到文件（原子写入）
-    /// </summary>
-    /// <returns>是否保存成功</returns>
     public bool Save(string path)
     {
+        // 命名 Mutex 用于跨进程互斥（ConfigApp <-> 服务进程）.
+        // 必须用 Global\ 前缀——Windows 服务在 session 0，ConfigApp 在 session 1+，
+        // 会话级 Mutex 无法跨 session。ConfigApp 用户态进程可能没有
+        // SeCreateGlobalPrivilege 权限，此时抛 UnauthorizedAccessException，回退到进程内锁。
+        System.Threading.Mutex? mutex = null;
+        bool mutexAcquired = false;
         try
         {
+            try
+            {
+                var mutexName = @"Global\EWeLinkLinker_Config_" + path.Replace('\\', '_').Replace('/', '_');
+                mutex = new System.Threading.Mutex(false, mutexName);
+                mutexAcquired = mutex.WaitOne(TimeSpan.FromSeconds(1.5));
+                if (!mutexAcquired)
+                {
+                    System.Diagnostics.Debug.WriteLine($"Config save timeout: {path}");
+                    return false;
+                }
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // ConfigApp 用户态进程无 SeCreateGlobalPrivilege 权限
+                // 回退到进程内锁（进程内 PathLocks 仍能防止同进程并发写）
+                System.Diagnostics.Debug.WriteLine($"Global mutex not available (user mode), using process-level lock: {path}");
+            }
+            catch (AbandonedMutexException)
+            {
+                // 另一进程持有 Mutex 时崩溃，我们已获取所有权
+                mutexAcquired = true;
+            }
+
             var dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-            {
                 Directory.CreateDirectory(dir);
-            }
 
             var json = JsonSerializer.Serialize(this, JsonOptions);
 
@@ -156,7 +155,6 @@ public class LinkerConfig
         }
         catch (Exception ex)
         {
-            // M-2 修复：至少写入 EventLog，不静默吞掉
             try
             {
                 System.Diagnostics.Debug.WriteLine($"Config save failed: {ex.Message}");
@@ -167,11 +165,13 @@ public class LinkerConfig
             catch { }
             return false;
         }
+        finally
+        {
+            if (mutexAcquired) mutex?.ReleaseMutex();
+            mutex?.Dispose();
+        }
     }
 
-    /// <summary>
-    /// Trim log file if it exceeds maxSizeBytes (default 1MB).
-    /// </summary>
     public static void TrimLogFile(string logPath, long maxSizeBytes = 1_048_576)
     {
         try
@@ -195,10 +195,6 @@ public class AccountConfig
 
     public string Account { get; set; } = string.Empty;
 
-    /// <summary>
-    /// H-22 修复：密码自动加密存储，解密读取
-    /// JSON 序列化器直接操作 PasswordEncrypted 字段，避免双重加密
-    /// </summary>
     [JsonIgnore]
     public string Password
     {
@@ -206,9 +202,6 @@ public class AccountConfig
         set => _password = string.IsNullOrEmpty(value) ? string.Empty : LinkerConfig.Protect(value);
     }
 
-    /// <summary>
-    /// JSON 序列化属性：存储加密后的密码
-    /// </summary>
     [JsonPropertyName("password")]
     public string PasswordEncrypted
     {
@@ -226,9 +219,6 @@ public class TokenConfig
     private string _refreshToken = string.Empty;
     private string _userApiKey = string.Empty;
 
-    /// <summary>
-    /// H-23 修复：Token 自动加密存储，解密读取
-    /// </summary>
     [JsonIgnore]
     public string AccessToken
     {
@@ -250,7 +240,6 @@ public class TokenConfig
         set => _userApiKey = string.IsNullOrEmpty(value) ? string.Empty : LinkerConfig.Protect(value);
     }
 
-    // JSON 序列化属性：存储加密后的值
     [JsonPropertyName("accessToken")]
     public string AccessTokenEncrypted
     {

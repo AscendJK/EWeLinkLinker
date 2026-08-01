@@ -54,23 +54,21 @@ public class LinkerService
         // 同步规则中的设备名称为最新配置
         SyncActionDeviceNames(config);
 
-        // 查找匹配的规则（支持新旧格式）
-        var rule = FindMatchingRule(config.Rules, eventName);
+        // 查找匹配的规则（支持新旧格式，只选启用的规则）
+        var rules = FindMatchingRules(config.Rules, eventName);
 
-        if (rule == null || rule.Actions.Count == 0)
+        if (rules.Count == 0)
         {
-            Log($"No actions configured for event: {eventName}");
+            Log($"No enabled rules configured for event: {eventName}");
             return;
         }
 
-        // LAN 控制不需要 token，只有云端 API 才需要
-        // 关机/睡眠时网络可能已断开，跳过 token 验证
         bool isLocalOnlyEvent = eventName.Equals("shutdown", StringComparison.OrdinalIgnoreCase) ||
                                  eventName.Equals("sleep", StringComparison.OrdinalIgnoreCase);
 
+        // LAN 控制不需要 token，只有云端 API 才需要
         if (!isLocalOnlyEvent)
         {
-            // 开机/唤醒时尝试获取 token（用于可能的云端操作）
             try
             {
                 var tokens = await _tokenManager.GetValidTokensAsync();
@@ -79,7 +77,6 @@ public class LinkerService
             catch (Exception ex)
             {
                 Log($"Token validation failed (LAN control will still work): {ex.Message}");
-                // LAN 控制不需要 token，继续执行
             }
         }
         else
@@ -87,11 +84,16 @@ public class LinkerService
             Log("Local-only event (shutdown/sleep), skipping token validation");
         }
 
-        Log($"Found {rule.Actions.Count} actions for event: {eventName}");
+        Log($"Found {rules.Count} enabled rules for event: {eventName}");
 
-        // Execute all actions concurrently (LAN control only)
-        var tasks = rule.Actions.Select(action => ExecuteActionAsync(config, action, ct));
-        await Task.WhenAll(tasks);
+        // 遍历所有匹配的规则（不只是第一条）
+        foreach (var rule in rules)
+        {
+            if (rule.Actions.Count == 0) continue;
+
+            Log($"  Rule '{rule.Name}': {rule.Actions.Count} actions");
+            await ExecuteActionsByDeviceAsync(rule.Actions, config, ct);
+        }
 
         Log($"Event {eventName} completed");
     }
@@ -113,12 +115,29 @@ public class LinkerService
         var config = LinkerConfig.Load(_configPath);
 
         Log($"Executing {rule.Actions.Count} actions for rule: {rule.Name}");
-
-        // 并发执行所有动作
-        var tasks = rule.Actions.Select(action => ExecuteActionAsync(config, action, ct));
-        await Task.WhenAll(tasks);
+        await ExecuteActionsByDeviceAsync(rule.Actions, config, ct);
 
         Log($"Rule '{rule.Name}' completed");
+    }
+
+    /// <summary>
+    /// 按设备分组执行动作：同设备的不同 outlet 串行，不同设备并发。
+    /// 避免对同一设备同时发多条命令（eWeLink 400 问题），同时最大化不同设备间的并行度。
+    /// </summary>
+    private async Task ExecuteActionsByDeviceAsync(IEnumerable<LinkerAction> actions, LinkerConfig config, CancellationToken ct)
+    {
+        // 按设备分组
+        var groups = actions.GroupBy(a => a.DeviceId);
+        var tasks = groups.Select(async group =>
+        {
+            // 同设备串行执行（按 action 顺序）
+            foreach (var action in group)
+            {
+                await ExecuteActionAsync(config, action, ct);
+            }
+        });
+        // 不同设备并发执行
+        await Task.WhenAll(tasks);
     }
 
     private async Task ExecuteActionAsync(LinkerConfig config, LinkerAction action, CancellationToken ct)
@@ -176,17 +195,21 @@ public class LinkerService
     /// 查找匹配的规则（支持新旧格式）
     /// H-15 修复：移除下划线替换匹配，仅精确匹配
     /// </summary>
-    private static LinkerRule? FindMatchingRule(List<LinkerRule> rules, string eventName)
+    private static List<LinkerRule> FindMatchingRules(List<LinkerRule> rules, string eventName)
     {
         // 首先尝试旧格式匹配（Event 属性）
-        var match = rules.FirstOrDefault(r =>
+        var matches = rules.Where(r =>
             !string.IsNullOrEmpty(r.Event) &&
-            r.Event.Equals(eventName, StringComparison.OrdinalIgnoreCase));
+            r.Event.Equals(eventName, StringComparison.OrdinalIgnoreCase) &&
+            r.Enabled) // 只选启用的规则
+            .ToList();
 
-        if (match != null) return match;
+        if (matches.Count > 0) return matches;
 
-        // 新格式匹配（Conditions 中的 Type）— 精确匹配，不做模糊替换
-        return rules.FirstOrDefault(r =>
-            r.Conditions.Any(c => c.Type.Equals(eventName, StringComparison.OrdinalIgnoreCase)));
+        // 新格式匹配（Conditions 中的 Type）
+        return rules.Where(r =>
+            r.Enabled && // 只选启用的规则
+            r.Conditions.Any(c => c.Type.Equals(eventName, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
     }
 }

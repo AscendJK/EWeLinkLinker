@@ -259,6 +259,11 @@ public class LinkerWindowsService : ServiceBase
         // 停止配置文件监控
         StopConfigWatcher();
 
+        // 释放 LAN/Cloud 客户端引用，避免 Dispose 后被使用
+        _lanClient = null;
+        _cloudClient = null;
+        _tokenManager = null;
+
         // H-2 修复：使用 GetAwaiter().GetResult() 避免 STA 线程死锁
         // 停止所有触发器（同步等待完成）
         if (_triggerManager != null)
@@ -301,26 +306,33 @@ public class LinkerWindowsService : ServiceBase
             _wakeCts?.Dispose();
             _wakeCts = null;
 
-            // 先停止触发器，避免执行过程中被中断
+            // 先停止触发器，避免执行过程中被中断（预算 1s）
             if (_triggerManager != null)
             {
                 try
                 {
-                    _triggerManager.StopAllAsync().AsTask().Wait(TimeSpan.FromSeconds(3));
+                    _triggerManager.StopAllAsync().AsTask().Wait(TimeSpan.FromSeconds(1));
                 }
-                catch (System.TimeoutException)
-                {
-                    Log("Stop triggers timeout during shutdown");
-                }
+                catch { /* 超时继续执行关机动作 */ }
             }
 
-            // 修复：使用 GetAwaiter().GetResult() 避免潜在死锁
-            ExecuteShutdownActions().GetAwaiter().GetResult();
-            _logger.Info("关机联动动作执行完成");
-        }
-        catch (System.TimeoutException)
-        {
-            _logger.Warn("关机联动动作超时（系统正在关机）");
+            // 关机动作：串行执行 + 总超时 3.5s，避免系统杀进程导致动作未完成
+            try
+            {
+                var shutdownTask = ExecuteShutdownActions();
+                if (!shutdownTask.Wait(TimeSpan.FromSeconds(3.5)))
+                {
+                    _logger.Warn("关机联动动作超时（系统正在关机）");
+                }
+                else
+                {
+                    _logger.Info("关机联动动作执行完成");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.Error("关机联动动作执行失败", ex);
+            }
         }
         catch (Exception ex)
         {
@@ -328,13 +340,16 @@ public class LinkerWindowsService : ServiceBase
         }
         finally
         {
-            // 释放所有资源（使用 null 合并赋值确保只释放一次）
+            // 释放所有资源，总预算控制在 5s 内
+            _lanClient = null;
+            _cloudClient = null;
+            _tokenManager = null;
             StopConfigWatcher();
             if (_triggerManager != null)
             {
                 try
                 {
-                    _triggerManager.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(3));
+                    _triggerManager.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(0.5));
                 }
                 catch { }
                 _triggerManager = null;
@@ -353,10 +368,18 @@ public class LinkerWindowsService : ServiceBase
             case PowerBroadcastStatus.Suspend:
                 Log("=== SYSTEM SUSPENDING ===");
                 // 睡眠时必须同步执行，系统会等待服务完成才进入睡眠
+                // 加总超时 1.5s，避免长时间阻塞导致系统进入睡眠延迟
                 try
                 {
-                    ExecuteSleepActions().GetAwaiter().GetResult();
-                    Log("Sleep actions completed successfully");
+                    var sleepTask = ExecuteSleepActions();
+                    if (!sleepTask.Wait(TimeSpan.FromSeconds(1.5)))
+                    {
+                        _logger.Warn("睡眠联动动作超时");
+                    }
+                    else
+                    {
+                        Log("Sleep actions completed successfully");
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -373,13 +396,14 @@ public class LinkerWindowsService : ServiceBase
                 // C-6 修复：覆盖前释放旧 CTS
                 _wakeCts?.Dispose();
                 _wakeCts = new CancellationTokenSource();
+                var wakeCts = _wakeCts; // 局部变量捕获，避免 OnStop/OnShutdown 并发 Dispose
                 _ = Task.Run(async () =>
                 {
                     try
                     {
                         Log("Wake: waiting 3s for network to restore...");
-                        await Task.Delay(3000, _wakeCts.Token);
-                        await ExecuteWakeActions(_wakeCts.Token);
+                        await Task.Delay(3000, wakeCts.Token);
+                        await ExecuteWakeActions(wakeCts.Token);
                         Log("Wake actions completed successfully");
                     }
                     catch (OperationCanceledException)
@@ -409,12 +433,14 @@ public class LinkerWindowsService : ServiceBase
         {
             Region = config.Account.Region
         };
+        // H-? 修复：先 Dispose 旧的 _tokenManager，释放 SemaphoreSlim，防止泄漏
+        (_tokenManager as IDisposable)?.Dispose();
         _tokenManager = new TokenManager(_cloudClient, _configPath);
     }
 
     public void StartAsConsole(string[] args)
     {
-        _lanClient = new LanClient(_sharedHttpClient);
+        // 注意：不在此处创建 _lanClient，OnStart 内部会调用 InitializeClients 并创建
         Log("Starting in console mode...");
         OnStart(args);
 
@@ -427,13 +453,12 @@ public class LinkerWindowsService : ServiceBase
             cts.Cancel();
         };
 
-        try
+        // WaitHandle.WaitOne() 不会抛出 OperationCanceledException，
+        // 它只在等待成功时返回 true，超时或信号量释放后返回 false。
+        // 实际取消由 cts.Cancel() 触发 WaitHandle 释放 → WaitOne 返回 false。
+        while (!cts.Token.WaitHandle.WaitOne(100))
         {
-            cts.Token.WaitHandle.WaitOne();
-        }
-        catch (OperationCanceledException)
-        {
-            Log("Console mode stopped by user");
+            // 每 100ms 轮询一次，允许响应取消请求
         }
 
         OnStop();

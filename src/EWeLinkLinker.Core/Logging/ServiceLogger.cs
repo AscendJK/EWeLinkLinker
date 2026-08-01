@@ -67,7 +67,7 @@ public sealed class ServiceLogger : IDisposable
     {
         try
         {
-            using var stream = new FileStream(_logPath, FileMode.Append, FileAccess.Write, FileShare.Read,
+            using var stream = new FileStream(_logPath, FileMode.Append, FileAccess.Write, FileShare.Read | FileShare.Delete,
                 bufferSize: 4096);
             using var writer = new StreamWriter(stream) { AutoFlush = true };
 
@@ -241,8 +241,13 @@ public sealed class ServiceLogger : IDisposable
         if (!LoggerConfig.IsEnabled || !_enabled || _disposed) return;
 
         var logEntry = $"[{DateTime.Now:HH:mm:ss.fff}] [{level}] {message}";
-        // 尝试写入队列（队列满时丢弃）
-        _logQueue.TryAdd(logEntry);
+        // H-? 修复：TryAdd 在 Dispose 后的 BlockingCollection 上可能抛 ObjectDisposedException
+        // _disposed 的 volatile 读和 Dispose 的 CompleteAdding 之间有极小竞态窗口
+        try
+        {
+            _logQueue.TryAdd(logEntry);
+        }
+        catch (ObjectDisposedException) { }
     }
 
     /// <summary>

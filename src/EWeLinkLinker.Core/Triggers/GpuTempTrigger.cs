@@ -149,6 +149,11 @@ public class GpuTempTrigger : OptimizedTriggerBase
             if (!_gpuInitialized && !_gpuInitFailed)
                 InitializeGpu();
 
+            // H-? 修复：在锁内调用 gpu.Update()，防止多线程并发 Update 导致竞态
+            if (_sharedGpu != null)
+            {
+                try { _sharedGpu.Update(); } catch { }
+            }
             gpu = _sharedGpu;
         }
 
@@ -156,7 +161,6 @@ public class GpuTempTrigger : OptimizedTriggerBase
 
         try
         {
-            gpu.Update();
 
             foreach (var sensor in gpu.Sensors)
             {

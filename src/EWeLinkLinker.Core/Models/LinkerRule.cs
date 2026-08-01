@@ -72,7 +72,12 @@ public partial class RuleCondition : ObservableObject
         {
             if (SetProperty(ref _type, value))
             {
-                Parameter = "";
+                // 注意：直接写字段而非走属性 setter，避免 STJ 反序列化时
+                // parameter 键先于 type 到达导致已加载的参数被清空。
+                // UI 层在类型变更时（SubTypeComboBox_SelectionChanged）会自行设置默认参数。
+                // _parameter 不再清空——STJ 反序列化顺序不确定，type 先于 parameter 到达时会清掉已加载的值
+                // UI 层（SubTypeComboBox_SelectionChanged）在类型变更时自行设置默认参数
+                OnPropertyChanged(nameof(Parameter));
                 OnPropertyChanged(nameof(IsTime));
                 OnPropertyChanged(nameof(IsInterval));
                 OnPropertyChanged(nameof(IsCpuTemp));

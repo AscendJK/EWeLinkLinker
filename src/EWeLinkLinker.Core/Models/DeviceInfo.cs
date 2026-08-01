@@ -25,7 +25,9 @@ public class DeviceInfo
 
     /// <summary>
     /// First channel power state (backward compatibility).
+    /// Not serialized — ChannelStates[0] is the canonical source.
     /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
     public string PowerState
     {
         get => ChannelCount > 0 ? ChannelStates[0] : "off";
@@ -42,14 +44,14 @@ public class DeviceInfo
     }
 
     /// <summary>
-    /// Number of channels (1-5). Automatically syncs ChannelStates list.
+    /// Number of channels (1-8). Automatically syncs ChannelStates list.
     /// </summary>
     public int ChannelCount
     {
         get => _channelCount;
         set
         {
-            _channelCount = Math.Clamp(value, 1, 5);
+            _channelCount = Math.Clamp(value, 1, 8);
             SyncChannelStates();
         }
     }

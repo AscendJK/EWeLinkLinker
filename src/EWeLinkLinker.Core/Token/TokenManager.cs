@@ -4,13 +4,13 @@ using EWeLinkLinker.Core.Models;
 
 namespace EWeLinkLinker.Core.Token;
 
-public class TokenManager(CloudClient cloudClient, string configPath)
+public class TokenManager(CloudClient cloudClient, string configPath) : IDisposable
 {
     private readonly SemaphoreSlim _refreshLock = new(1, 1);
     // 静态复用 JwtSecurityTokenHandler（线程安全）
     private static readonly JwtSecurityTokenHandler JwtHandler = new();
 
-    public async Task<AuthTokens> GetValidTokensAsync()
+    public async Task<AuthTokens> GetValidTokensAsync(CancellationToken ct = default)
     {
         var config = Config.LinkerConfig.Load(configPath);
 
@@ -21,7 +21,7 @@ public class TokenManager(CloudClient cloudClient, string configPath)
 
         if (IsTokenExpired(config.Tokens.AccessToken))
         {
-            await _refreshLock.WaitAsync();
+            await _refreshLock.WaitAsync(ct);
             try
             {
                 // Double-check after acquiring lock
@@ -54,7 +54,9 @@ public class TokenManager(CloudClient cloudClient, string configPath)
         var freshConfig = Config.LinkerConfig.Load(configPath);
         freshConfig.Tokens.AccessToken = newTokens.AccessToken;
         freshConfig.Tokens.RefreshToken = newTokens.RefreshToken;
-        freshConfig.Tokens.UserApiKey = newTokens.UserApiKey;
+        // H-? 修复：防止空 UserApiKey 覆盖已有的有效 key（某些刷新响应不含 apikey 字段）
+        if (!string.IsNullOrEmpty(newTokens.UserApiKey))
+            freshConfig.Tokens.UserApiKey = newTokens.UserApiKey;
         freshConfig.Save(configPath);
 
         return newTokens;
@@ -110,6 +112,11 @@ public class TokenManager(CloudClient cloudClient, string configPath)
             config.Save(configPath);
             return tokens;
         }
+    }
+
+    public void Dispose()
+    {
+        _refreshLock.Dispose();
     }
 
     private void SaveTokensToConfig(AuthTokens tokens)

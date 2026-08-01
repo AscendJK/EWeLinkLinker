@@ -14,34 +14,6 @@
 - [常见问题排查](#常见问题排查)
 
 ---
-
-## 项目概述
-
-EWeLink Linker 是一个 Windows 平台的智能设备联动控制系统。它通过监控 PC 的状态（开关机、睡眠唤醒、CPU 温度、GPU 温度、CPU 使用率、应用启停等），自动控制 eWeLink 智能插座/开关的通断。
-
-### 核心功能
-
-| 功能 | 描述 |
-| --- | --- |
-| 电源事件联动 | 开机/关机/睡眠/唤醒时自动控制设备 |
-| 定时触发 | 每天固定时间执行动作 |
-| 间隔触发 | 每隔 N 分钟循环执行 |
-| CPU/GPU 监控 | 温度/使用率超阈值时触发 |
-| 应用监控 | 指定应用启动/关闭时触发 |
-| 复合条件 | 支持 AND/OR 逻辑组合多个条件 |
-| 本地控制 | 通过 LAN 协议直控设备，无需云端 |
-| 配置热重载 | 修改配置后自动生效，无需重启服务 |
-| 可调轮询间隔 | 1-30 秒可配置，默认 5 秒 |
-
-### 技术栈
-
-- **运行时**: .NET 10.0
-- **UI框架**: WPF (Windows Presentation Foundation)
-- **服务**: Windows Service (ServiceBase)
-- **通信**: HTTP/REST (云端 API) + TCP Socket (LAN 协议)
-- **加密**: AES-128-CBC (LAN) + DPAPI (配置文件) + HMAC-SHA256 (云端签名)
-- **序列化**: System.Text.Json
-
 ---
 
 ## 快速开始
@@ -76,52 +48,19 @@ dotnet build -c Release
 
 ### 4. 安装服务
 
-1. 点击 **"安装"**（需要管理员权限）
+ConfigApp 中：
+1. 点击 **"安装"**（需要管理员权限，UAC 提示）
 2. 点击 **"启动"** 启动服务
 
+或使用 PowerShell 脚本（同样需要管理员权限）：
+
+| 脚本 | 功能 |
+| --- | --- |
+| `install.ps1` | 编译 + 安装 + 启动（一条龙） |
+| `install-simple.ps1` | 仅安装 + 启动（需要已编译的二进制） |
+| `uninstall.ps1` | 停止 + 删除服务（不删除配置和日志） |
+
 ---
-
-## 配置系统
-
-### 配置文件
-
-`publish/config/linker.json`
-
-```json
-{
-  "loggingEnabled": true,
-  "pollingIntervalSeconds": 5,
-  "account": {
-    "account": "your@email.com",
-    "password": "加密存储",
-    "countryCode": "+86",
-    "region": "cn"
-  },
-  "tokens": {
-    "accessToken": "DPAPI加密",
-    "refreshToken": "DPAPI加密",
-    "userApiKey": "DPAPI加密"
-  },
-  "devices": [...],
-  "rules": [...]
-}
-```
-
-### 配置项说明
-
-| 配置项 | 类型 | 默认值 | 说明 |
-| --- | --- | --- | --- |
-| `loggingEnabled` | bool | true | 是否启用日志 |
-| `pollingIntervalSeconds` | int | 5 | 轮询间隔（1-30 秒） |
-| `account.password` | string | - | DPAPI 加密存储 |
-| `tokens.*` | string | - | DPAPI 加密存储 |
-
-### 安全特性
-
-- **密码加密**: 使用 Windows DPAPI (LocalMachine 范围)
-- **Token 加密**: 所有 Token 使用 DPAPI 加密
-- **旧版兼容**: 自动兼容未加密的旧配置文件
-
 ---
 
 ## 触发器系统
@@ -177,6 +116,7 @@ dotnet build -c Release
 
 规则解释：CPU温度 ≥ 75°C **或** GPU温度 ≥ 75°C 时，打开设备通道0。
 
+---
 ---
 
 ## 添加新的触发条件
@@ -292,89 +232,6 @@ public class MemoryUsageTrigger : OptimizedTriggerBase
 5. **日志输出**: 使用 `Log(TraceLevel.Info, message)` 记录关键信息
 
 ---
-
-## 架构设计
-
-### 整体架构
-
-```text
-┌─────────────────────────────────────────────────────────────┐
-│                    ConfigApp (WPF)                           │
-│  ┌─────────┐ ┌──────────┐ ┌──────────┐ ┌─────────────────┐ │
-│  │ 登录    │ │ 设备发现 │ │ 规则编辑 │ │ 服务控制        │ │
-│  └─────────┘ └──────────┘ └──────────┘ └─────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
-                           │ 共享配置文件 (linker.json)
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│                  LinkerWindowsService                        │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │ TriggerManager                                        │  │
-│  │  ┌─────────────────────────────────────────────────┐ │  │
-│  │  │ PollingScheduler (Timer: 5s)                     │ │  │
-│  │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐       │ │  │
-│  │  │  │ CpuTemp  │ │ GpuTemp  │ │ AppStart │ ...   │ │  │
-│  │  │  └──────────┘ └──────────┘ └──────────┘       │ │  │
-│  │  └─────────────────────────────────────────────────┘ │  │
-│  └──────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-```
-
-### 工作流程
-
-```text
-服务启动
-  │
-  ├─ 加载配置 (linker.json)
-  ├─ 初始化日志 (ServiceLogger)
-  ├─ 创建 TriggerManager
-  │    ├─ 创建 PollingScheduler
-  │    ├─ 遍历规则 → 创建 RuleTrigger
-  │    │    └─ 为每个条件创建 Trigger 实例
-  │    └─ 注册到 PollingScheduler
-  ├─ 启动 Timer (每 5 秒)
-  └─ 启动 FileSystemWatcher (监控配置变化)
-
-轮询周期 (每 5 秒)
-  │
-  ├─ 清空 SensorCache
-  ├─ 并发轮询所有触发器 (最多 4 并发)
-  │    └─ Trigger.EvaluateCoreAsync()
-  │         ├─ 读取传感器 (SensorCache 共享)
-  │         ├─ 比较条件
-  │         └─ 边沿检测
-  ├─ 等待所有触发器完成
-  └─ 调用 OnPollingComplete 回调
-       └─ RuleTrigger.EvaluateCompositeCondition()
-            └─ 条件满足 → 执行动作 (控制设备)
-```
-
-### 关键组件
-
-| 组件 | 职责 |
-| --- | --- |
-| `ServiceLogger` | 异步日志写入 (BlockingCollection + 后台线程) |
-| `SensorCache` | 传感器缓存 (每轮只读一次) |
-| `PollingScheduler` | 定时轮询调度器 |
-| `TriggerManager` | 触发器管理 (加载、启动、重载) |
-| `RuleTrigger` | 复合条件评估 (AND/OR) |
-| `ComparisonHelper` | 条件比较逻辑 |
-
-### 传感器缓存机制
-
-```text
-第 1 秒: 轮询开始
-  ├─ CpuTempTrigger1 → SensorCache.GetOrCreate("cpu_temp", ReadCpuTemperature)
-  │    └─ 首次调用 → 读取 WMI → 缓存值 → 返回
-  ├─ CpuTempTrigger2 → SensorCache.GetOrCreate("cpu_temp", ...)
-  │    └─ 命中缓存 → 直接返回 (不重新读取)
-  └─ GpuTempTrigger1 → SensorCache.GetOrCreate("gpu_temp", ReadGpuTemperature)
-       └─ 首次调用 → 读取 LibreHardwareMonitor → 缓存值 → 返回
-
-第 6 秒: 下一轮轮询
-  └─ SensorCache.Clear() → 释放旧缓存 → 重新读取
-```
-
 ---
 
 ## 日志系统
@@ -413,41 +270,6 @@ public class MemoryUsageTrigger : OptimizedTriggerBase
 - **📄 按钮**: 打开日志文件夹
 
 ---
-
-## 常见问题排查
-
-### 服务无法启动
-
-| 原因 | 解决方案 |
-| --- | --- |
-| .NET 10 未安装 | 安装 .NET 10 Runtime |
-| 配置文件损坏 | 删除 `linker.json` 重新登录 |
-| 端口被占用 | 更换端口或关闭占用程序 |
-
-### 设备无法控制
-
-| 原因 | 解决方案 |
-| --- | --- |
-| 设备 IP 未知 | 点击"刷新IP"自动发现 |
-| 设备离线 | 检查设备网络连接 |
-| LAN 协议失败 | 服务自动切换到云端 API |
-
-### 触发器不触发
-
-| 原因 | 解决方案 |
-| --- | --- |
-| 条件参数错误 | 检查阈值和比较符 |
-| 传感器读取失败 | 检查日志中的警告信息 |
-| 规则未启用 | 检查规则 CheckBox |
-
-### 日志不输出
-
-| 原因 | 解决方案 |
-| --- | --- |
-| 日志未启用 | 检查 ConfigApp 中的日志 CheckBox |
-| 服务未重启 | 修改配置后重启服务 |
-| 文件权限问题 | 检查 logs 目录写入权限 |
-
 ---
 
 ## 开发注意事项
@@ -493,7 +315,3 @@ EWeLinkLinker/
 - 日志使用 `Log(TraceLevel, message)` 方法
 
 ---
-
-## 许可证
-
-本项目仅供学习和个人使用。
