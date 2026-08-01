@@ -315,3 +315,8 @@ EWeLinkLinker/
 - 日志使用 `Log(TraceLevel, message)` 方法
 
 ---
+
+## 致谢
+\n本项目登录功能、云端 API 通信协议（HMAC-SHA256 签名、AppId/SignKey）参考了 [AlexxIT/SonoffLAN](https://github.com/AlexxIT/SonoffLAN) 开源项目。感谢原作者的工作。
+\nSonoffLAN 使用 MIT 许可证，本项目的参考部分遵守该许可证的条款。
+\n---
