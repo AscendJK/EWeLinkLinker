@@ -146,12 +146,13 @@ public class AppStartTrigger : OptimizedTriggerBase
             if (matchedIds.Count > 0) return matchedIds.ToList();
 
             // 方式3: 包含匹配（进程名包含配置字符串）
+            // 仅单向匹配：进程名包含配置串才命中；去掉反向（配置串包含进程名），
+            // 避免 "palworld" 等短配置误匹配无关长进程名
             foreach (var p in allProcesses)
             {
                 var name = SafeGetProcessName(p);
                 if (name != null &&
-                    (name.Contains(cleanName, StringComparison.OrdinalIgnoreCase) ||
-                     cleanName.Contains(name, StringComparison.OrdinalIgnoreCase)))
+                    name.Contains(cleanName, StringComparison.OrdinalIgnoreCase))
                     matchedIds.Add(p.Id);
             }
 

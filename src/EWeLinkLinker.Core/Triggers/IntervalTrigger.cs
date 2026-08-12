@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using EWeLinkLinker.Core.Models;
 
 namespace EWeLinkLinker.Core.Triggers;
@@ -59,7 +60,12 @@ public class IntervalTrigger : OptimizedTriggerBase
             if (!_wasTriggered)
             {
                 _wasTriggered = true;
+                // H-18 修复：触发时更新基准时间
                 _lastTriggered = DateTime.Now;
+                // 记录自然时间间隔语义（含睡眠/待机时间）：
+                // 睡眠期间轮询停止，唤醒后若已超时会立即触发一次
+                Log(TraceLevel.Info,
+                    $"间隔触发: 距上次 {elapsed.TotalMinutes:F1} 分钟（自然时间，含睡眠），间隔 {_intervalMinutes} 分钟");
                 return ValueTask.FromResult(true);
             }
             return ValueTask.FromResult(false);

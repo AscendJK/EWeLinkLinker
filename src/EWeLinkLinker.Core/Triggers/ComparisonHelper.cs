@@ -17,6 +17,9 @@ internal static class ComparisonHelper
     /// <returns>是否满足</returns>
     public static bool Evaluate(float actualValue, string parameter, string parameter2, ComparisonOperator comparison)
     {
+        // 传感器读取失败或参数解析失败（NaN）时安全失败：不触发、不误判
+        if (float.IsNaN(actualValue)) return false;
+
         switch (comparison)
         {
             case ComparisonOperator.Gte:
@@ -73,6 +76,8 @@ internal static class ComparisonHelper
 
     private static float ParseSingle(string parameter)
     {
-        return float.TryParse(parameter, out var value) ? value : 0;
+        // 解析失败返回 NaN：所有比较分支与 NaN 比较均为 false（安全失败），
+        // 避免坏参数变成阈值 0 导致规则恒满足
+        return float.TryParse(parameter, out var value) ? value : float.NaN;
     }
 }

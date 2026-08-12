@@ -646,7 +646,7 @@ public partial class MainWindow : Window, IDisposable
             Log($"  btn.DataContext={btn.DataContext?.GetType().Name} value={btn.DataContext}");
             if (btn.DataContext is LinkerRule rule)
             {
-                rule.Conditions.Add(new RuleCondition { Type = "time", Parameter = "08:00", Operator = LogicalOperator.And });
+                rule.Conditions.Add(new RuleCondition { Type = "time", Parameter = "08:00", Comparison = ComparisonOperator.Eq, Operator = LogicalOperator.And });
                 Log($"  成功添加条件，当前数量: {rule.Conditions.Count}");
             }
             else
