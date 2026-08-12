@@ -1,4 +1,4 @@
-# Install EWeLink Linker Service
+﻿# Install EWeLink Linker Service
 # Can be run from ConfigApp's publish directory or project root
 
 param(
@@ -71,23 +71,17 @@ if (-not (Test-Path $exePath)) {
     exit 1
 }
 
-# Create config and logs directories
-$configDir = Join-Path $publishDir "config"
+# Create shared config directory (both ConfigApp and Service resolve publish\config via ..\config)
+$configDir = Join-Path $projectRoot "publish\config"
 $logDir = Join-Path $publishDir "logs"
 
 if (-not (Test-Path $configDir)) { New-Item -ItemType Directory -Path $configDir -Force | Out-Null }
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 
-# Copy config from ConfigApp if exists
-$appConfig = Join-Path $projectRoot "publish\ConfigApp\config\linker.json"
-$svcConfig = Join-Path $configDir "linker.json"
-
-if (Test-Path $appConfig) {
-    Copy-Item $appConfig $svcConfig -Force
-    Write-Host "Copied config from ConfigApp to Service directory" -ForegroundColor Green
-}
-elseif (-not (Test-Path $svcConfig)) {
-    Write-Host "WARNING: No config found. Please run ConfigApp first to create linker.json" -ForegroundColor Yellow
+# Shared config file is created by ConfigApp (publish\config\linker.json); service reads the same file directly
+$sharedConfig = Join-Path $configDir "linker.json"
+if (-not (Test-Path $sharedConfig)) {
+    Write-Host "WARNING: No config found at $sharedConfig. Please run ConfigApp first to create linker.json" -ForegroundColor Yellow
 }
 
 # Remove existing service if present
@@ -135,7 +129,7 @@ catch {
 
 Write-Host "" -ForegroundColor Green
 Write-Host "=== Installation Complete ===" -ForegroundColor Green
-Write-Host "Config: $svcConfig" -ForegroundColor Cyan
+Write-Host "Config: $sharedConfig" -ForegroundColor Cyan
 Write-Host "Logs:   $logDir" -ForegroundColor Cyan
 Write-Host "Service: $serviceName" -ForegroundColor Cyan
 

@@ -350,6 +350,7 @@
                                                                                 <core:ComparisonOperator>Eq</core:ComparisonOperator>
                                                                                 <core:ComparisonOperator>Neq</core:ComparisonOperator>
                                                                                 <core:ComparisonOperator>Range</core:ComparisonOperator>
+                                                                                <core:ComparisonOperator>OutsideRange</core:ComparisonOperator>
                                                                             </x:Array>
                                                                         </ComboBox.ItemsSource>
                                                                         <ComboBox.ItemTemplate>

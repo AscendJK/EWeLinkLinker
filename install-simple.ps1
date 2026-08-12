@@ -1,4 +1,4 @@
-# Simple install script - no build, just install
+﻿# Simple install script - no build, just install
 param(
     [string]$ServicePath = "E:\ClaudeCode\EWeLinkLinker\publish\Service\EWeLinkLinker.Service.exe"
 )

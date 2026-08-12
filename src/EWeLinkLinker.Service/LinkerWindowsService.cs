@@ -494,7 +494,8 @@ public class LinkerWindowsService : ServiceBase
     {
         try
         {
-            var service = CreateLinkerService();
+            // 关机是本地事件（纯 LAN 控制），不要求云 Token
+            var service = CreateLinkerService(requireToken: false);
             if (service != null)
             {
                 Log("Executing shutdown actions...");
@@ -516,7 +517,8 @@ public class LinkerWindowsService : ServiceBase
     {
         try
         {
-            var service = CreateLinkerService();
+            // 睡眠是本地事件（纯 LAN 控制），不要求云 Token
+            var service = CreateLinkerService(requireToken: false);
             if (service != null)
             {
                 Log("Executing sleep actions...");
@@ -552,7 +554,7 @@ public class LinkerWindowsService : ServiceBase
         }
     }
 
-    private LinkerService? CreateLinkerService()
+    private LinkerService? CreateLinkerService(bool requireToken = true)
     {
         if (!File.Exists(_configPath))
         {
@@ -561,7 +563,9 @@ public class LinkerWindowsService : ServiceBase
         }
 
         var config = LinkerConfig.Load(_configPath);
-        if (string.IsNullOrEmpty(config.Tokens.AccessToken))
+        // 仅非本地事件（boot/wake）要求云 Token；shutdown/sleep 是纯 LAN 本地事件，
+        // 与 LinkerService.ExecuteEventAsync 的 isLocalOnlyEvent 语义保持一致
+        if (requireToken && string.IsNullOrEmpty(config.Tokens.AccessToken))
         {
             Log("Access token not configured. Please login via ConfigApp first.");
             return null;

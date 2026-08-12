@@ -81,6 +81,7 @@ public class ComparisonToDisplayConverter : IValueConverter
                 ComparisonOperator.Eq => "=",
                 ComparisonOperator.Neq => "≠",
                 ComparisonOperator.Range => "范围",
+                ComparisonOperator.OutsideRange => "范围外",
                 _ => comparison.ToString()
             };
         }

@@ -1,4 +1,4 @@
-# Uninstall EWeLink Linker Service
+﻿# Uninstall EWeLink Linker Service
 # Run as Administrator
 
 $serviceName = "EWeLinkLinker"
