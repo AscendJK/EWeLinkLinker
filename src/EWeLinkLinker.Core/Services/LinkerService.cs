@@ -109,17 +109,25 @@ public class LinkerService
 
     /// <summary>
     /// 事件触发时评估规则条件：
-    /// - 纯电源规则：直接返回 true（事件名已由 FindMatchingRules 匹配）
-    /// - 混合规则：电源条件不阻塞，非电源条件用临时触发器实时评估一次，全部满足才返回 true
+    /// - 电源条件已由事件匹配，视为满足（不阻塞）
+    /// - 非电源条件用临时触发器实时评估一次（先 Start 播种初始状态，语义与轮询一致）
+    /// - 分组语义与 RuleTrigger.EvaluateCompositeCondition 一致：AND > OR
     /// </summary>
     private async Task<bool> EvaluateRuleConditionsOnEventAsync(LinkerRule rule, CancellationToken ct)
     {
-        // 纯电源规则（没有需要轮询的条件）直接执行
-        if (rule.Conditions.All(c => IsPowerCondition(c.Type))) return true;
+        var conditions = rule.Conditions;
+        if (conditions.Count == 0) return true;
 
-        foreach (var condition in rule.Conditions)
+        // 逐条件实时评估
+        var results = new bool[conditions.Count];
+        for (int i = 0; i < conditions.Count; i++)
         {
-            if (IsPowerCondition(condition.Type)) continue; // 电源条件已由事件匹配，不阻塞
+            var condition = conditions[i];
+            if (TriggerManager.IsPowerCondition(condition.Type))
+            {
+                results[i] = true; // 电源条件已由事件匹配
+                continue;
+            }
 
             try
             {
@@ -131,8 +139,8 @@ public class LinkerService
                     Comparison = condition.Comparison
                 };
                 using var trigger = TriggerRegistry.Create(config);
-                if (!await trigger.PollAsync(ct))
-                    return false;
+                trigger.Start(); // 播种初始状态（app_start 已知进程、interval 计时起点等）
+                results[i] = await trigger.PollAsync(ct);
             }
             catch (Exception ex)
             {
@@ -140,14 +148,35 @@ public class LinkerService
                 return false;
             }
         }
-        return true;
-    }
 
-    private static bool IsPowerCondition(string type) =>
-        type.Equals("boot", StringComparison.OrdinalIgnoreCase) ||
-        type.Equals("shutdown", StringComparison.OrdinalIgnoreCase) ||
-        type.Equals("sleep", StringComparison.OrdinalIgnoreCase) ||
-        type.Equals("wake", StringComparison.OrdinalIgnoreCase);
+        // 与 RuleTrigger.EvaluateCompositeCondition 一致：按 OR 分组，组内 AND，组间 OR
+        if (conditions.Count == 1) return results[0];
+
+        var groups = new List<List<int>>();
+        var currentGroup = new List<int> { 0 };
+        for (int i = 1; i < conditions.Count; i++)
+        {
+            if (conditions[i].Operator == LogicalOperator.Or)
+            {
+                groups.Add(currentGroup);
+                currentGroup = new List<int> { i };
+            }
+            else
+            {
+                currentGroup.Add(i);
+            }
+        }
+        groups.Add(currentGroup);
+
+        foreach (var group in groups)
+        {
+            bool groupResult = true;
+            foreach (var idx in group)
+                groupResult = groupResult && results[idx];
+            if (groupResult) return true;
+        }
+        return false;
+    }
 
     /// <summary>
     /// 执行规则（由 RuleTrigger 调用）
