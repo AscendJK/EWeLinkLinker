@@ -14,6 +14,7 @@ public class CpuUsageTrigger : OptimizedTriggerBase
     private readonly string _parameter2;
     private readonly ComparisonOperator _comparison;
     private bool _wasTriggered;
+    private int _pollCount;
 
     // 静态共享 PerformanceCounter（所有 CpuUsageTrigger 共享，线程安全）
     private static PerformanceCounter? _sharedCounter;
@@ -62,6 +63,17 @@ public class CpuUsageTrigger : OptimizedTriggerBase
         if (float.IsNaN(usage)) return ValueTask.FromResult(false);
 
         var isTriggered = ComparisonHelper.Evaluate(usage, _parameter, _parameter2, _comparison);
+
+        _pollCount++;
+        if (_pollCount % 10 == 0)
+        {
+            // 记录实际读数 vs 阈值，便于判断比较语义是否正确
+            var threshold = string.IsNullOrEmpty(_parameter2)
+                ? $"{_parameter}%"
+                : $"{_parameter}~{_parameter2}%";
+            Log(TraceLevel.Info,
+                $"CPU使用率: {usage:F1}%, 阈值: {_comparison} {threshold}, 状态: {(isTriggered ? "满足" : "不满足")}");
+        }
 
         // 边沿检测：从未满足变为满足时触发，保持锁存直到条件消失
         if (isTriggered && !_wasTriggered)

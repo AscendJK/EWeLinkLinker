@@ -70,7 +70,12 @@ public class CpuTempTrigger : OptimizedTriggerBase
         _pollCount++;
         if (_pollCount % 10 == 0)
         {
-            Log(TraceLevel.Info, $"CPU温度: {temp:F1}°C, 状态: {(isTriggered ? "满足" : "不满足")}");
+            // 记录实际读数 vs 阈值，便于判断比较语义是否正确
+            var threshold = string.IsNullOrEmpty(_parameter2)
+                ? $"{_parameter}°C"
+                : $"{_parameter}~{_parameter2}°C";
+            Log(TraceLevel.Info,
+                $"CPU温度: {temp:F1}°C (热区{(_zoneIndex >= 0 ? _zoneIndex.ToString() : "?")}), 阈值: {_comparison} {threshold}, 状态: {(isTriggered ? "满足" : "不满足")}");
         }
 
         // 边沿检测：从未满足变为满足时触发，保持锁存直到条件消失
@@ -91,6 +96,8 @@ public class CpuTempTrigger : OptimizedTriggerBase
     }
 
     private bool _loggedWmiError;
+    // 当前实际读取的热区索引（供日志诊断：确认是否取到最高温热区）
+    private static int _zoneIndex = -1;
 
     private static float ReadCpuTemperature()
     {
@@ -99,6 +106,10 @@ public class CpuTempTrigger : OptimizedTriggerBase
             using var searcher = new System.Management.ManagementObjectSearcher(
                 @"root\WMI", "SELECT * FROM MSAcpi_ThermalZoneTemperature");
 
+            // 遍历所有热区，取最高有效温度（多 CCD/多 Die CPU 可能暴露多个 _TZ 热区，
+            // 第一个热区不一定是最热的那一个）
+            float maxTemp = float.NaN;
+            int index = 0;
             foreach (var obj in searcher.Get())
             {
                 using (obj)
@@ -106,9 +117,18 @@ public class CpuTempTrigger : OptimizedTriggerBase
                     var tempK = Convert.ToUInt32(obj["CurrentTemperature"]);
                     var tempC = (tempK - 2732) / 10.0f;
                     if (tempC > 0 && tempC < 150)
-                        return tempC;
+                    {
+                        if (float.IsNaN(maxTemp) || tempC > maxTemp)
+                        {
+                            maxTemp = tempC;
+                            _zoneIndex = index;
+                        }
+                    }
                 }
+                index++;
             }
+
+            if (!float.IsNaN(maxTemp)) return maxTemp;
         }
         catch { }
 
