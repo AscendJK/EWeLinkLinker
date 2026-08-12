@@ -17,6 +17,8 @@ public class GpuTempTrigger : OptimizedTriggerBase
     private readonly ComparisonOperator _comparison;
     private bool _wasTriggered;
     private int _pollCount;
+    // 当前实际读取的传感器名称（供日志诊断：确认是否选到 GPU Core / Hot Spot / Memory）
+    private static string? _sensorName;
 
     // 静态共享的 GPU 硬件实例（所有 GpuTempTrigger 共享）
     private static Computer? _sharedComputer;
@@ -70,7 +72,12 @@ public class GpuTempTrigger : OptimizedTriggerBase
         _pollCount++;
         if (_pollCount % 10 == 0)
         {
-            Log(TraceLevel.Info, $"GPU温度: {temp:F1}°C, 状态: {(isTriggered ? "满足" : "不满足")}");
+            // 记录实际读数 vs 阈值，便于判断比较语义是否正确
+            var threshold = string.IsNullOrEmpty(_parameter2)
+                ? $"{_parameter}°C"
+                : $"{_parameter}~{_parameter2}°C";
+            Log(TraceLevel.Info,
+                $"GPU温度: {temp:F1}°C ({_sensorName ?? "?"}), 阈值: {_comparison} {threshold}, 状态: {(isTriggered ? "满足" : "不满足")}");
         }
 
         // 边沿检测：从未满足变为满足时触发，保持锁存直到条件消失
@@ -161,21 +168,43 @@ public class GpuTempTrigger : OptimizedTriggerBase
 
         try
         {
+            // 优先级1：GPU 核心温度（GPU Core / Core），避免选到 Hot Spot（偏高）或 Memory（偏低）
+            foreach (var sensor in gpu.Sensors)
+            {
+                if (sensor.SensorType != SensorType.Temperature || !sensor.Value.HasValue) continue;
+                var name = sensor.Name;
+                if (name.Contains("GPU Core", StringComparison.OrdinalIgnoreCase)
+                    || name.Equals("Core", StringComparison.OrdinalIgnoreCase))
+                {
+                    _sensorName = name;
+                    return sensor.Value.Value;
+                }
+            }
 
+            // 优先级2：通用 GPU 温度（排除易误导的显存/热点/结温传感器）
+            foreach (var sensor in gpu.Sensors)
+            {
+                if (sensor.SensorType != SensorType.Temperature || !sensor.Value.HasValue) continue;
+                var name = sensor.Name;
+                if (name.Contains("GPU", StringComparison.OrdinalIgnoreCase)
+                    && !name.Contains("Memory", StringComparison.OrdinalIgnoreCase)
+                    && !name.Contains("Hot Spot", StringComparison.OrdinalIgnoreCase)
+                    && !name.Contains("Junction", StringComparison.OrdinalIgnoreCase)
+                    && !name.Contains("VRAM", StringComparison.OrdinalIgnoreCase))
+                {
+                    _sensorName = name;
+                    return sensor.Value.Value;
+                }
+            }
+
+            // 优先级3：任意温度传感器（兜底）
             foreach (var sensor in gpu.Sensors)
             {
                 if (sensor.SensorType == SensorType.Temperature && sensor.Value.HasValue)
                 {
-                    if (sensor.Name.Contains("GPU", StringComparison.OrdinalIgnoreCase)
-                        || sensor.Name.Contains("Core", StringComparison.OrdinalIgnoreCase))
-                        return sensor.Value.Value;
-                }
-            }
-
-            foreach (var sensor in gpu.Sensors)
-            {
-                if (sensor.SensorType == SensorType.Temperature && sensor.Value.HasValue)
+                    _sensorName = sensor.Name;
                     return sensor.Value.Value;
+                }
             }
         }
         catch (Exception ex)
