@@ -323,6 +323,7 @@
 
                                                                     <!-- 触发类型 -->
                                                                     <ComboBox Grid.Column="1" SelectedValue="{Binding Type}" SelectedValuePath="Tag"
+                                                                              SelectionChanged="ConditionTypeCombo_SelectionChanged"
                                                                               Margin="0,0,4,0" FontSize="11" VerticalAlignment="Center">
                                                                         <ComboBoxItem Content="时间" Tag="time"/>
                                                                         <ComboBoxItem Content="间隔" Tag="interval"/>

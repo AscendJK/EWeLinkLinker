@@ -687,6 +687,38 @@ public partial class MainWindow : Window, IDisposable
         }
     }
 
+    /// <summary>
+    /// 条件类型切换时重置默认比较符：
+    /// time -> Eq（固定时刻窗口）；数值类（cpu_temp/cpu_usage/gpu_temp）-> Gte。
+    /// 仅当"确实发生了选择变化"（RemovedItems 含旧值）时应用，避免初始化绑定误改。
+    /// </summary>
+    private void ConditionTypeCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (e.RemovedItems.Count == 0) return; // 初始化绑定/无旧值时不处理
+
+        if (sender is ComboBox combo && combo.SelectedItem is ComboBoxItem item && item.Tag is string tag)
+        {
+            if (combo.DataContext is RuleCondition condition)
+            {
+                switch (tag)
+                {
+                    case "time":
+                        // 切换到 time：若当前是数值类型的默认 Gte，则改为 Eq（每天固定时刻）
+                        if (condition.Comparison == ComparisonOperator.Gte)
+                            condition.Comparison = ComparisonOperator.Eq;
+                        break;
+                    case "cpu_temp":
+                    case "cpu_usage":
+                    case "gpu_temp":
+                        // 切换到数值类型：若当前是 time 的默认 Eq，则改为 Gte（阈值语义）
+                        if (condition.Comparison == ComparisonOperator.Eq)
+                            condition.Comparison = ComparisonOperator.Gte;
+                        break;
+                }
+            }
+        }
+    }
+
     private void RemoveCondition_Click(object sender, RoutedEventArgs e)
     {
         if (sender is Button btn && btn.DataContext is RuleCondition condition)
