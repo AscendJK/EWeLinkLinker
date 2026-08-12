@@ -25,7 +25,7 @@ public class LinkerAction : INotifyPropertyChanged
     public string Name
     {
         get => _name;
-        set { if (_name != value) { _name = value; OnPropertyChanged(); UpdateDeviceIdFromName(); } }
+        set { if (_name != value) { _name = value; OnPropertyChanged(); } }
     }
 
     public string State
@@ -45,12 +45,6 @@ public class LinkerAction : INotifyPropertyChanged
     /// </summary>
     [JsonIgnore]
     public string DisplayText => $"{Name} 通道{Outlet}: {(State == "on" ? "开" : "关")}";
-
-    private void UpdateDeviceIdFromName()
-    {
-        // 当名称变化时，尝试从全局设备列表更新 DeviceId
-        // 这里不直接引用 MainWindow，避免循环依赖
-    }
 
     public event PropertyChangedEventHandler? PropertyChanged;
     protected void OnPropertyChanged([CallerMemberName] string? propertyName = null)

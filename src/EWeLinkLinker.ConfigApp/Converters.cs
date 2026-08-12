@@ -6,28 +6,6 @@ using EWeLinkLinker.Core.Models;
 
 namespace EWeLinkLinker.ConfigApp;
 
-public class StateToIndexConverter : IValueConverter
-{
-    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
-    {
-        if (value is string state)
-        {
-            // Treat null, empty, or "on" as "on" (index 0); everything else as "off" (index 1)
-            return string.IsNullOrEmpty(state) || state.Equals("on", StringComparison.OrdinalIgnoreCase) ? 0 : 1;
-        }
-        return 0;
-    }
-
-    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
-    {
-        if (value is int index)
-        {
-            return index == 0 ? "on" : "off";
-        }
-        return "on";
-    }
-}
-
 public class BoolToStringConverter : System.Windows.Data.IValueConverter
 {
     public string TrueValue { get; set; } = "是";
@@ -48,23 +26,6 @@ public class BoolToStringConverter : System.Windows.Data.IValueConverter
     }
 }
 
-public class ChannelToIndexConverter : IValueConverter
-{
-    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
-    {
-        if (value is int channelCount && channelCount >= 1 && channelCount <= 5)
-            return channelCount - 1;
-        return 0;
-    }
-
-    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
-    {
-        if (value is int index)
-            return index + 1;
-        return 1;
-    }
-}
-
 /// <summary>
 /// 将在线状态转换为颜色画笔：true=绿色, false=灰色
 /// </summary>
@@ -78,49 +39,6 @@ public class StatusToBrushConverter : IValueConverter
         if (value is bool isOnline && isOnline)
             return SuccessBrush;
         return OfflineBrush;
-    }
-
-    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
-    {
-        throw new NotImplementedException();
-    }
-}
-
-/// <summary>
-/// Convert power-state string to Chinese display: on=开, off=关
-/// </summary>
-public class StateToOnOffConverter : IValueConverter
-{
-    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
-    {
-        if (value is string s && s.Equals("on", StringComparison.OrdinalIgnoreCase))
-            return "开";
-        return "关";
-    }
-
-    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
-    {
-        if (value is string s && s == "开")
-            return "on";
-        return "off";
-    }
-}
-
-/// <summary>
-/// Convert service status text to a color brush: RUNNING=green, STOPPED=red, else gray
-/// </summary>
-public class ServiceStatusToBrushConverter : IValueConverter
-{
-    private static readonly Brush RunningBrush = new SolidColorBrush(Color.FromRgb(0x4C, 0xAF, 0x50));
-    private static readonly Brush StoppedBrush = new SolidColorBrush(Color.FromRgb(0xF4, 0x43, 0x36));
-    private static readonly Brush UnknownBrush = new SolidColorBrush(Color.FromRgb(0x9E, 0x9E, 0x9E));
-
-    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
-    {
-        var s = value?.ToString()?.ToUpperInvariant() ?? "";
-        if (s.Contains("RUNNING")) return RunningBrush;
-        if (s.Contains("STOPPED")) return StoppedBrush;
-        return UnknownBrush;
     }
 
     public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)

@@ -238,9 +238,7 @@ public class CloudClient
                 Name = deviceData.TryGetProperty("name", out var name) ? name.GetString() ?? "Unknown" : "Unknown",
                 IpAddress = deviceData.TryGetProperty("ip", out var ip) ? ip.GetString() ?? "" : "",
                 DeviceKey = deviceData.TryGetProperty("devicekey", out var key) ? key.GetString() ?? "" : "",
-                DeviceApiKey = deviceData.TryGetProperty("apikey", out var apikey) ? apikey.GetString() ?? "" : "",
                 MacAddress = macAddress,
-                Uuid = deviceData.TryGetProperty("uuid", out var uuid) ? uuid.GetInt32() : 0,
                 IsOnline = deviceData.TryGetProperty("online", out var online) && online.GetBoolean(),
                 ChannelCount = channelCount,
                 ChannelStates = channelStates

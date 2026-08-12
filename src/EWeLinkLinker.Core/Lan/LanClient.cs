@@ -593,14 +593,4 @@ public class LanClient
         }
         return false;
     }
-
-    /// <summary>
-    /// Query device power state via LAN protocol.
-    /// Note: Most eWeLink devices do NOT support reading state via LAN.
-    /// Use Cloud API (GetDevicesAsync) for state refresh instead.
-    /// </summary>
-    public Task<bool> RefreshDeviceStateAsync(DeviceInfo device)
-    {
-        return Task.FromResult(false);
-    }
 }

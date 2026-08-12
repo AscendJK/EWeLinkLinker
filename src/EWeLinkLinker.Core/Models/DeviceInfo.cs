@@ -17,22 +17,10 @@ public class DeviceInfo
     public string Name { get; set; } = string.Empty;
     public string IpAddress { get; set; } = string.Empty;
     public string DeviceKey { get; set; } = string.Empty;
-    public string DeviceApiKey { get; set; } = string.Empty;
     public string MacAddress { get; set; } = string.Empty;  // Cloud MAC (read-only, may be fake)
     public string RealMacAddress { get; set; } = string.Empty;  // User-entered real MAC
-    public int Uuid { get; set; }
     public bool IsOnline { get; set; }
 
-    /// <summary>
-    /// First channel power state (backward compatibility).
-    /// Not serialized — ChannelStates[0] is the canonical source.
-    /// </summary>
-    [System.Text.Json.Serialization.JsonIgnore]
-    public string PowerState
-    {
-        get => ChannelCount > 0 ? ChannelStates[0] : "off";
-        set { if (ChannelCount > 0) ChannelStates[0] = value; }
-    }
 
     /// <summary>
     /// Per-channel power states. Always kept in sync with ChannelCount.
@@ -82,28 +70,6 @@ public class DeviceInfo
     [System.Text.Json.Serialization.JsonIgnore]
     public string EffectiveMac => !string.IsNullOrEmpty(RealMacAddress) ? RealMacAddress : MacAddress;
 
-    /// <summary>
-    /// Display string for all channel states in device list.
-    /// Single channel: "on" / "off"
-    /// Multi-channel: "通1:开 通2:关 通3:开"
-    /// </summary>
-    [System.Text.Json.Serialization.JsonIgnore]
-    public string StateDisplay
-    {
-        get
-        {
-            if (ChannelCount <= 1)
-                return PowerState;
-
-            var parts = new List<string>();
-            for (int i = 0; i < ChannelCount; i++)
-            {
-                string state = i < ChannelStates.Count ? ChannelStates[i] : "off";
-                parts.Add($"通{i}:{(state == "on" ? "开" : "关")}");
-            }
-            return string.Join(" ", parts);
-        }
-    }
 
     /// <summary>
     /// Display string for cloud MAC in UI (always shows original cloud MAC).
