@@ -19,6 +19,20 @@ public class TimeTrigger : OptimizedTriggerBase
 
     protected override TimeSpan PollingInterval => TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// 有效触发窗口：至少覆盖两个全局轮询间隔（30s 全局间隔时窗口为 60s），
+    /// 避免轮询间隔较大时首次轮询落在窗口之外导致当日错过触发
+    /// </summary>
+    private TimeSpan EffectiveWindow
+    {
+        get
+        {
+            var global = GlobalPollingInterval ?? TimeSpan.Zero;
+            var twiceGlobal = TimeSpan.FromTicks(global.Ticks * 2);
+            return twiceGlobal > PollingInterval ? twiceGlobal : PollingInterval;
+        }
+    }
+
     public TimeTrigger(TriggerConfig config) : base()
     {
         if (!ValidateParameter(config.Parameter, out var error))
@@ -86,11 +100,11 @@ public class TimeTrigger : OptimizedTriggerBase
     private bool EqCheck(DateTime now, DateTime today)
     {
         // C-7 修复：使用"今日是否已触发" + "首次进入窗口时触发"
-        // 扩大窗口到整个轮询间隔，避免边界错过
+        // 窗口至少覆盖两个全局轮询间隔，避免轮询间隔较大时错过每日触发窗口
         if (_lastTriggeredDate == today) return false;
         var diff = now.TimeOfDay - _time;
-        // 窗口：diff >= 0（已过目标时间）且 diff <= PollingInterval（首次进入窗口）
-        var isMatch = diff >= TimeSpan.Zero && diff <= PollingInterval;
+        // 窗口：diff >= 0（已过目标时间）且 diff <= EffectiveWindow（首次进入窗口）
+        var isMatch = diff >= TimeSpan.Zero && diff <= EffectiveWindow;
         if (isMatch) _lastTriggeredDate = today;
         return isMatch;
     }
@@ -99,7 +113,7 @@ public class TimeTrigger : OptimizedTriggerBase
     {
         if (_lastTriggeredDate == today) return false;
         var diff = now.TimeOfDay - _time;
-        var isOutSide = diff > PollingInterval || diff < TimeSpan.Zero;
+        var isOutSide = diff > EffectiveWindow || diff < TimeSpan.Zero;
         if (isOutSide) _lastTriggeredDate = today;
         return isOutSide;
     }

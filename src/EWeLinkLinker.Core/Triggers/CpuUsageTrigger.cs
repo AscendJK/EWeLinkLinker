@@ -58,6 +58,9 @@ public class CpuUsageTrigger : OptimizedTriggerBase
             ? SensorCache.GetOrCreate("cpu_usage", ReadCpuUsage)
             : ReadCpuUsage();
 
+        // 读取失败（NaN）时不触发也不复位，保持当前状态（与温度触发器一致，安全失败）
+        if (float.IsNaN(usage)) return ValueTask.FromResult(false);
+
         var isTriggered = ComparisonHelper.Evaluate(usage, _parameter, _parameter2, _comparison);
 
         // 边沿检测：从未满足变为满足时触发，保持锁存直到条件消失
@@ -92,11 +95,12 @@ public class CpuUsageTrigger : OptimizedTriggerBase
                     _sharedCounter.NextValue();  // 首次调用返回 0，需要预热
                     _counterInitialized = true;
                 }
-                return _sharedCounter?.NextValue() ?? 0f;
+                return _sharedCounter?.NextValue() ?? float.NaN;
             }
             catch
             {
-                return 0f;
+                // 读取失败返回 NaN（安全失败），避免低阈值/反向比较误触发
+                return float.NaN;
             }
         }
     }

@@ -44,6 +44,7 @@ public sealed class PollingScheduler : IAsyncDisposable
         {
             _triggers[trigger.Id] = trigger;
             trigger.SensorCache = _sensorCache;  // 注入传感器缓存
+            trigger.GlobalPollingInterval = _baseInterval;  // 注入全局轮询间隔（供窗口计算）
             // 如果已经在运行，立即启动新注册的触发器
             if (_isRunning)
             {

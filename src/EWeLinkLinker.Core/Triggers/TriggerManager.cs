@@ -14,6 +14,7 @@ public sealed class TriggerManager : IAsyncDisposable
     private readonly string _logPath;
     private readonly Dictionary<string, RuleTrigger> _ruleTriggers = new();
     private PollingScheduler? _scheduler;
+    private int _pollingIntervalSeconds = 5;
     private bool _disposed;
 
     public TriggerManager(LinkerService linkerService, string logPath, ServiceLogger logger)
@@ -35,6 +36,7 @@ public sealed class TriggerManager : IAsyncDisposable
 
         // 创建调度器（使用配置的轮询间隔）
         var interval = TimeSpan.FromSeconds(Math.Clamp(pollingIntervalSeconds, 1, 30));
+        _pollingIntervalSeconds = (int)interval.TotalSeconds;
         _scheduler = new PollingScheduler(_logger, interval);
 
         int activeRules = 0;
@@ -50,10 +52,11 @@ public sealed class TriggerManager : IAsyncDisposable
                 continue;
             }
 
-            // 跳过纯电源事件规则（由 ServiceBase 事件处理）
-            if (rule.Conditions.All(c => IsPowerCondition(c.Type)))
+            // 跳过含电源事件条件的规则（由 LinkerService 系统事件处理：
+            // 纯电源规则在事件触发时直接执行；混合规则在事件触发时评估其余非电源条件）
+            if (rule.Conditions.Any(c => IsPowerCondition(c.Type)))
             {
-                _logger.Info($"规则 [{rule.Name}] 仅包含电源事件，跳过（由系统事件处理）");
+                _logger.Info($"规则 [{rule.Name}] 包含电源事件条件，跳过轮询（由系统事件处理）");
                 continue;
             }
 
@@ -103,7 +106,7 @@ public sealed class TriggerManager : IAsyncDisposable
     public async ValueTask StartAllAsync()
     {
         _scheduler?.Start();
-        _logger.LogListenerStarted("PollingScheduler", "5s");
+        _logger.LogListenerStarted("PollingScheduler", $"{_pollingIntervalSeconds}s");
 
         // 记录每个触发器的状态
         foreach (var (id, trigger) in _ruleTriggers)

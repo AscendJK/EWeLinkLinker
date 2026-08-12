@@ -43,6 +43,10 @@ public class LinkerWindowsService : ServiceBase
         // Initialize logger (disabled by default, will be enabled after config load)
         _logger = new ServiceLogger(_logPath, enabled: false);
 
+        // 初始化 SimpleLogger（触发器传感器读数、LAN/云端详情、动作执行细节写入独立文件，
+        // 避免与 ServiceLogger 共用文件句柄导致写入冲突/日志截断）
+        Core.Logging.SimpleLogger.Initialize(Path.Combine(logDir, $"service-detail-{DateTime.Now:yyyy-MM-dd}.log"));
+
         // 修复：使用 SocketsHttpHandler 并设置 PooledConnectionLifetime 以支持 DNS 变更
         var handler = new System.Net.Http.SocketsHttpHandler
         {

@@ -124,7 +124,8 @@ public class AppStartTrigger : OptimizedTriggerBase
             var cleanName = config.ToLower().Replace(".exe", "").Trim();
             foreach (var p in allProcesses)
             {
-                if (p.ProcessName.Equals(cleanName, StringComparison.OrdinalIgnoreCase))
+                var name = SafeGetProcessName(p);
+                if (name != null && name.Equals(cleanName, StringComparison.OrdinalIgnoreCase))
                     matchedIds.Add(p.Id);
             }
 
@@ -136,7 +137,8 @@ public class AppStartTrigger : OptimizedTriggerBase
             {
                 foreach (var p in allProcesses)
                 {
-                    if (p.ProcessName.Equals(firstWord, StringComparison.OrdinalIgnoreCase))
+                    var name = SafeGetProcessName(p);
+                    if (name != null && name.Equals(firstWord, StringComparison.OrdinalIgnoreCase))
                         matchedIds.Add(p.Id);
                 }
             }
@@ -146,8 +148,10 @@ public class AppStartTrigger : OptimizedTriggerBase
             // 方式3: 包含匹配（进程名包含配置字符串）
             foreach (var p in allProcesses)
             {
-                if (p.ProcessName.Contains(cleanName, StringComparison.OrdinalIgnoreCase) ||
-                    cleanName.Contains(p.ProcessName, StringComparison.OrdinalIgnoreCase))
+                var name = SafeGetProcessName(p);
+                if (name != null &&
+                    (name.Contains(cleanName, StringComparison.OrdinalIgnoreCase) ||
+                     cleanName.Contains(name, StringComparison.OrdinalIgnoreCase)))
                     matchedIds.Add(p.Id);
             }
 
@@ -156,8 +160,9 @@ public class AppStartTrigger : OptimizedTriggerBase
             // 方式4: 尝试匹配 MainWindowTitle（窗口标题）
             foreach (var p in allProcesses)
             {
-                if (!string.IsNullOrEmpty(p.MainWindowTitle) &&
-                    p.MainWindowTitle.Contains(config, StringComparison.OrdinalIgnoreCase))
+                var title = SafeGetWindowTitle(p);
+                if (!string.IsNullOrEmpty(title) &&
+                    title.Contains(config, StringComparison.OrdinalIgnoreCase))
                     matchedIds.Add(p.Id);
             }
 
@@ -174,6 +179,24 @@ public class AppStartTrigger : OptimizedTriggerBase
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// 安全读取进程名：进程可能在遍历中退出，访问其属性会抛 Win32Exception
+    /// </summary>
+    private static string? SafeGetProcessName(Process p)
+    {
+        try { return p.ProcessName; }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// 安全读取窗口标题：无桌面访问权限或进程退出时可能抛异常
+    /// </summary>
+    private static string? SafeGetWindowTitle(Process p)
+    {
+        try { return p.MainWindowTitle; }
+        catch { return null; }
     }
 
     /// <summary>

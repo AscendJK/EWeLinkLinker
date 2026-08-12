@@ -4,6 +4,7 @@ using EWeLinkLinker.Core.Lan;
 using EWeLinkLinker.Core.Logging;
 using EWeLinkLinker.Core.Models;
 using EWeLinkLinker.Core.Token;
+using EWeLinkLinker.Core.Triggers;
 using Microsoft.Extensions.Logging;
 
 namespace EWeLinkLinker.Core.Services;
@@ -91,12 +92,62 @@ public class LinkerService
         {
             if (rule.Actions.Count == 0) continue;
 
+            // 混合规则（电源事件 + 轮询条件）：事件触发时实时评估非电源条件，
+            // 全部满足才执行动作，避免轮询条件被静默忽略
+            if (!await EvaluateRuleConditionsOnEventAsync(rule, ct))
+            {
+                Log($"  Rule '{rule.Name}': 条件未满足，跳过");
+                continue;
+            }
+
             Log($"  Rule '{rule.Name}': {rule.Actions.Count} actions");
             await ExecuteActionsByDeviceAsync(rule.Actions, config, ct);
         }
 
         Log($"Event {eventName} completed");
     }
+
+    /// <summary>
+    /// 事件触发时评估规则条件：
+    /// - 纯电源规则：直接返回 true（事件名已由 FindMatchingRules 匹配）
+    /// - 混合规则：电源条件不阻塞，非电源条件用临时触发器实时评估一次，全部满足才返回 true
+    /// </summary>
+    private async Task<bool> EvaluateRuleConditionsOnEventAsync(LinkerRule rule, CancellationToken ct)
+    {
+        // 纯电源规则（没有需要轮询的条件）直接执行
+        if (rule.Conditions.All(c => IsPowerCondition(c.Type))) return true;
+
+        foreach (var condition in rule.Conditions)
+        {
+            if (IsPowerCondition(condition.Type)) continue; // 电源条件已由事件匹配，不阻塞
+
+            try
+            {
+                var config = new TriggerConfig
+                {
+                    Type = condition.Type,
+                    Parameter = condition.Parameter,
+                    Parameter2 = condition.Parameter2,
+                    Comparison = condition.Comparison
+                };
+                using var trigger = TriggerRegistry.Create(config);
+                if (!await trigger.PollAsync(ct))
+                    return false;
+            }
+            catch (Exception ex)
+            {
+                LogError($"评估规则 [{rule.Name}] 条件 {condition.Type} 失败", ex);
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static bool IsPowerCondition(string type) =>
+        type.Equals("boot", StringComparison.OrdinalIgnoreCase) ||
+        type.Equals("shutdown", StringComparison.OrdinalIgnoreCase) ||
+        type.Equals("sleep", StringComparison.OrdinalIgnoreCase) ||
+        type.Equals("wake", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// 执行规则（由 RuleTrigger 调用）

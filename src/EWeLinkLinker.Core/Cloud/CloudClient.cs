@@ -172,7 +172,8 @@ public class CloudClient
 
     public async Task<List<DeviceInfo>> GetDevicesAsync(string accessToken, int maxDevices = 200)
     {
-        var url = $"{BaseUrl}/v2/device/thing?num=0";
+        // size 参数用于分页，避免设备较多时只返回第一页
+        var url = $"{BaseUrl}/v2/device/thing?num=0&size={maxDevices}";
 
         var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Add("Authorization", $"Bearer {accessToken}");

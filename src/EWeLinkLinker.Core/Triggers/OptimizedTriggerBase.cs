@@ -157,6 +157,12 @@ public abstract class OptimizedTriggerBase : ITrigger
     internal SensorCache? SensorCache { get; set; }
 
     /// <summary>
+    /// 全局轮询间隔（由 PollingScheduler 在 Register 时注入）。
+    /// 用于需要感知轮询频率的窗口计算（如 TimeTrigger 的每日触发窗口）。
+    /// </summary>
+    internal TimeSpan? GlobalPollingInterval { get; set; }
+
+    /// <summary>
     /// 日志路径（由 TriggerManager 设置）
     /// </summary>
     private string? _logPath;

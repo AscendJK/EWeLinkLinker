@@ -103,6 +103,32 @@ public class LanClient
     {
         try
         {
+            // 第一遍：优先选择带默认网关的 IPv4 接口（真实上网网卡），
+            // 避免 VPN / Hyper-V 虚拟网卡（Up 状态但无网关）被误选
+            foreach (var iface in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (iface.OperationalStatus != OperationalStatus.Up) continue;
+                if (iface.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
+
+                var props = iface.GetIPProperties();
+                bool hasGateway = props.GatewayAddresses.Any(g =>
+                    g.Address != null && !g.Address.Equals(IPAddress.Any));
+                if (!hasGateway) continue;
+
+                foreach (var addr in props.UnicastAddresses)
+                {
+                    if (addr.Address.AddressFamily != AddressFamily.InterNetwork) continue;
+
+                    var ip = addr.Address.ToString();
+                    if (ip.StartsWith("169.254.")) continue;
+
+                    var parts = ip.Split('.');
+                    if (parts.Length == 4)
+                        return $"{parts[0]}.{parts[1]}.{parts[2]}";
+                }
+            }
+
+            // 回退：任意 Up 状态的 IPv4 接口
             foreach (var iface in NetworkInterface.GetAllNetworkInterfaces())
             {
                 if (iface.OperationalStatus != OperationalStatus.Up) continue;
@@ -521,8 +547,9 @@ public class LanClient
         }
         catch (TaskCanceledException)
         {
-            SimpleLogger.Log($"[LAN] {device.Name} timeout");
-            return false;
+            // H-? 修复：HTTP 超时也走 Socket 兜底，避免设备忙碌时直接失败
+            SimpleLogger.Log($"[LAN] {device.Name} HTTP timeout, falling back to socket");
+            return await SendViaSocketAsync(device, requestBody);
         }
         catch (Exception ex)
         {
@@ -561,11 +588,16 @@ public class LanClient
                 if (bodyStart >= 0)
                 {
                     var jsonBody = fullResponse[(bodyStart + 4)..].Trim();
-                    if (!string.IsNullOrEmpty(jsonBody) &&
-                        (jsonBody.Contains("\"error\":0") || jsonBody.Contains("\"error\": 0")))
-                        return true;
                     if (string.IsNullOrEmpty(jsonBody)) return false;
-                    return true; // 200 但无 body，视为成功
+                    try
+                    {
+                        // 与 HTTP 路径一致，用 JSON 解析判断 error 字段
+                        using var doc = JsonDocument.Parse(jsonBody);
+                        if (doc.RootElement.TryGetProperty("error", out var error))
+                            return error.GetInt32() == 0;
+                    }
+                    catch (JsonException) { }
+                    return true; // 200 且无 error 字段，视为成功
                 }
                 return true;
             }

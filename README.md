@@ -4,14 +4,12 @@
 
 ## 目录
 
-- [项目概述](#项目概述)
 - [快速开始](#快速开始)
-- [配置系统](#配置系统)
 - [触发器系统](#触发器系统)
 - [添加新的触发条件](#添加新的触发条件)
-- [架构设计](#架构设计)
 - [日志系统](#日志系统)
-- [常见问题排查](#常见问题排查)
+- [开发注意事项](#开发注意事项)
+- [致谢](#致谢)
 
 ---
 ---
@@ -51,7 +49,11 @@ dotnet build -c Release
    > 填写后点击 **"保存配置"**，服务端会自动用真实 MAC 重新匹配 ARP 表进行发现。
    > 已填写的真实 MAC 地址在重新登录后**不会被覆盖**。
 
-6. 再次点击 **"刷新IP"** 或等待服务端自动发现
+6. 再次点击 **"刷新IP"** 完成发现
+
+   > ⚠️ 注意：设备 IP 发现只在 ConfigApp 中手动执行（点击"刷新IP"或自动发现按钮），
+   > **服务端不会自动发现设备 IP**。若设备通过 DHCP 更换了 IP（重启路由器、重新插拔网线等），
+   > 需要在 ConfigApp 中重新点击"刷新IP"并保存配置，否则服务端将无法控制该设备。
 
 ### 3. 配置联动规则
 
@@ -106,6 +108,7 @@ ConfigApp 中：
 | = | `Eq` | 全部 |
 | ≠ | `Neq` | 全部 |
 | 范围 | `Range` | 数值（格式：`min,max`） |
+| 范围外 | `OutsideRange` | 数值（格式：`min,max`） |
 
 ### 逻辑组合
 
@@ -136,6 +139,9 @@ ConfigApp 中：
 ## 添加新的触发条件
 
 ### 步骤
+
+> ⚠️ **注意**：以下是一个**开发模板示例**，`memory_usage` **并非本项目内置的触发器类型**，
+> 且示例中的 `GetMemoryUsage()` 尚未实现（恒返回 0）。如需使用，请完成内存读取实现后再按步骤添加。
 
 #### 1. 创建触发器类
 
@@ -254,7 +260,8 @@ public class MemoryUsageTrigger : OptimizedTriggerBase
 
 | 文件 | 位置 | 用途 |
 | --- | --- | --- |
-| `service-YYYY-MM-DD.log` | `publish/Service/logs/` | 服务端日志 |
+| `service-YYYY-MM-DD.log` | `publish/Service/logs/` | 服务端日志（规则/触发器状态、条件评估） |
+| `service-detail-YYYY-MM-DD.log` | `publish/Service/logs/` | 服务端详细日志（设备控制动作、LAN/云端调用、传感器读数） |
 | `debug.log` | `publish/config/` | 调试日志 (ConfigApp) |
 
 ### 日志格式
@@ -263,7 +270,7 @@ public class MemoryUsageTrigger : OptimizedTriggerBase
 [HH:mm:ss.fff] [LEVEL] 消息内容
 ```
 
-### 服务端日志示例
+### 服务端日志示例（`service-*.log`）
 
 ```text
 [10:45:04.403] [INFO] Logging enabled: True
@@ -273,8 +280,9 @@ public class MemoryUsageTrigger : OptimizedTriggerBase
 [10:45:19.789] [INFO] ✓ 条件触发: CPU温度 (a1b2c3d4)
 [10:45:19.790] [INFO] [RuleTrigger:规则 2] cpu_temp=Triggered, gpu_temp=Monitoring => 满足
 [10:45:19.791] [INFO] !! 规则触发 [规则 2] 原因: cpu_temp=75(满足)
-[10:45:19.800] [INFO] 动作执行 水冷 通道0 -> on [成功]
 ```
+
+设备动作执行的详细信息（如 `设备 xx 通道0 -> on`）写入 `service-detail-YYYY-MM-DD.log`。
 
 ### 日志配置
 
