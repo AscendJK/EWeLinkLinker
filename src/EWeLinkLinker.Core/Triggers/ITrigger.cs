@@ -56,32 +56,6 @@ public interface ITrigger : IDisposable
 }
 
 /// <summary>
-/// 复合触发器接口 - 支持 AND/OR 逻辑
-/// </summary>
-public interface ICompositeTrigger : ITrigger
-{
-    /// <summary>
-    /// 逻辑运算符
-    /// </summary>
-    LogicalOperator Operator { get; }
-
-    /// <summary>
-    /// 子触发器列表
-    /// </summary>
-    IReadOnlyList<ITrigger> Children { get; }
-
-    /// <summary>
-    /// 添加子触发器
-    /// </summary>
-    void AddChild(ITrigger trigger);
-
-    /// <summary>
-    /// 移除子触发器
-    /// </summary>
-    void RemoveChild(string triggerId);
-}
-
-/// <summary>
 /// 触发器配置基类
 /// </summary>
 public class TriggerConfig
