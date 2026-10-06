@@ -349,7 +349,8 @@ public partial class MainWindow : Window, IDisposable
                 },
                 Devices = devicesToSave,
                 Rules = existingConfig.Rules,  // M-6 修复：登录时保留旧规则，不覆盖
-                LoggingEnabled = existingConfig.LoggingEnabled
+                LoggingEnabled = existingConfig.LoggingEnabled,
+                PollingIntervalSeconds = existingConfig.PollingIntervalSeconds  // 保留轮询间隔，登录不该把它打回 5s
             };
             config.Save(_configPath);
             Log("[登录] Token 已保存");
@@ -1498,6 +1499,14 @@ public partial class MainWindow : Window, IDisposable
             var savedActionDeviceIds = SaveActionDeviceIds();
 
             var devices = await _cloudClient.GetDevicesAsync(tokens.AccessToken);
+
+            // 云端偶发返回空表（结构异常、账号侧异常）。直接替换会把设备下拉清空，
+            // TwoWay 绑定随即把每条规则的 DeviceId 写成 null 并存盘，事后无法自愈
+            if (devices.Count == 0 && _allDevices.Count > 0)
+            {
+                Log($"[登录] 云端返回 0 个设备，保留本地 {_allDevices.Count} 个，不覆盖设备列表");
+                devices = _allDevices;
+            }
 
             // Bug 修复：从旧配置中合并用户输入的 RealMacAddress，避免登录后丢失
             MergeDeviceMacAddresses(devices);

@@ -196,7 +196,9 @@ public class CloudClient
             thingList.ValueKind != JsonValueKind.Array)
         {
             SimpleLogger.Log("[Cloud] GetDevices: unexpected response structure");
-            return new List<DeviceInfo>();
+            // 结构异常不是"0 个设备"。返回空表会让调用方把设备列表覆盖成空，
+            // 连带把规则里的 DeviceId 写成 null，所以要明确失败
+            throw new InvalidOperationException("云端设备列表返回结构异常，已中止（设备与规则未做任何改动）");
         }
 
         var devices = new List<DeviceInfo>();
