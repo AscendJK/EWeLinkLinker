@@ -174,6 +174,27 @@ public class LinkerConfig
         }
     }
 
+    /// <summary>与 Save 使用完全相同的序列化，供"内容没变就不重写文件"的比较。</summary>
+    public string ToJson() => JsonSerializer.Serialize(this, JsonOptions);
+
+    /// <summary>
+    /// 磁盘上现有内容与将要写入的一字不差时返回 true。读不动文件一律当作"有变化"，
+    /// 宁可多写一次，也不能把用户的保存变成静默失败。
+    /// </summary>
+    public bool MatchesFile(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return false;
+            var existing = File.ReadAllText(path).TrimStart((char)0xFEFF);
+            return string.Equals(existing.TrimEnd(), ToJson().TrimEnd(), StringComparison.Ordinal);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public bool Save(string path)
     {
         FileStream? fileLock = null;

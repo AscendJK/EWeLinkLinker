@@ -234,7 +234,9 @@ public partial class MainWindow : Window, IDisposable
             };
     }
 
-    private void SaveConfig()
+    private enum SaveOutcome { Saved, Unchanged, Aborted }
+
+    private SaveOutcome SaveConfig()
     {
         try
         {
@@ -257,7 +259,7 @@ public partial class MainWindow : Window, IDisposable
                         Log($"[保存] 中止：规则 [{rule.Name}] 解除带宽校验失败 -> {releaseError}");
                         MessageBox.Show($"规则「{rule.Name}」的抖动带宽有问题：\n\n{releaseError}",
                                         "无法保存", MessageBoxButton.OK, MessageBoxImage.Warning);
-                        return;
+                        return SaveOutcome.Aborted;
                     }
                 }
             }
@@ -319,6 +321,14 @@ public partial class MainWindow : Window, IDisposable
                 }
             }
 
+            // 内容一字不差时不重写文件：启动时的自动 IP 发现和关窗保存都属于"没改任何东西"，
+            // 以前每次都会把真配置整个替换一遍，让 mtime 和文件内容变成无法信任的信号。
+            if (config.MatchesFile(_configPath))
+            {
+                Log("[保存] 内容与磁盘完全一致，跳过写入（配置文件未被改动）");
+                return SaveOutcome.Unchanged;
+            }
+
             config.Save(_configPath);
             Log($"[保存] 配置已保存到: {_configPath}");
 
@@ -328,12 +338,14 @@ public partial class MainWindow : Window, IDisposable
                 var savedJson = File.ReadAllText(_configPath);
                 Log($"[保存] 文件大小: {savedJson.Length} 字符");
             }
+            return SaveOutcome.Saved;
         }
         catch (Exception ex)
         {
             Log($"[保存] 错误: {ex.Message}");
             Log($"[保存] 堆栈: {ex.StackTrace}");
             MessageBox.Show($"保存失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+            return SaveOutcome.Aborted;
         }
     }
 
@@ -1084,8 +1096,16 @@ public partial class MainWindow : Window, IDisposable
 
     private void SaveConfig_Click(object sender, RoutedEventArgs e)
     {
-        SaveConfig();
-        MessageBox.Show("配置已保存！", "保存配置", MessageBoxButton.OK, MessageBoxImage.Information);
+        switch (SaveConfig())
+        {
+            case SaveOutcome.Saved:
+                MessageBox.Show("配置已保存！", "保存配置", MessageBoxButton.OK, MessageBoxImage.Information);
+                break;
+            case SaveOutcome.Unchanged:
+                // 没改任何东西时不再假装"已保存"，也不碰文件
+                MessageBox.Show("内容没有变化，配置文件未改动。", "保存配置", MessageBoxButton.OK, MessageBoxImage.Information);
+                break;
+        }
     }
 
     // ─── Service Control ────────────────────────────────
@@ -1227,10 +1247,14 @@ public partial class MainWindow : Window, IDisposable
     {
         try
         {
+            var want = LoggingCheckBox.IsChecked == true;
             var config = LinkerConfig.Load(_configPath);
-            config.LoggingEnabled = LoggingCheckBox.IsChecked == true;
+            // 打开窗口时绑定初始化也会触发这个事件，磁盘值没变就不要重写配置
+            if (config.LoggingEnabled == want) return;
+
+            config.LoggingEnabled = want;
             config.Save(_configPath);
-            Log($"日志已{(config.LoggingEnabled ? "启用" : "禁用")}");
+            Log($"日志已{(want ? "启用" : "禁用")}");
         }
         catch (Exception ex)
         {
@@ -1256,6 +1280,9 @@ public partial class MainWindow : Window, IDisposable
 
             int newInterval = intervals[index];
             var config = LinkerConfig.Load(_configPath);
+            // 同样：加载配置填充下拉框时也会触发，磁盘上已经是这个值就不要重写
+            if (config.PollingIntervalSeconds == newInterval) return;
+
             config.PollingIntervalSeconds = newInterval;
             config.Save(_configPath);
 
