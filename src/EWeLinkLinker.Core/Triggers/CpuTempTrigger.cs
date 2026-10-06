@@ -84,6 +84,10 @@ public class CpuTempTrigger : OptimizedTriggerBase
             _wasTriggered = false;
             _latchedSinceUtc = null;
             State = TriggerState.Monitoring;
+            // 这一轮只松开，不顺手补一个脉冲：否则 PollAsync 拿到的是过期的 wasMonitoring，
+            // 状态回不到 Triggered，日志写着"条件触发"而规则那边判定为不满足、不会执行动作。
+            // 动作交给下一轮真正的上升沿发出。
+            return ValueTask.FromResult(false);
         }
 
         // 滞回：已锁存时，只有越过解除线才算不再满足
