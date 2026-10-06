@@ -246,6 +246,10 @@ public class LinkerService
             {
                 LogError($"Failed to control device {device.Name}");
             }
+
+            // 设备命令必须无条件留痕：日志开关是为了降噪，不该顺带抹掉
+            // 「硬件在什么时候被下过什么令」——重启时机尤其依赖这条记录
+            SimpleLogger.Log($"[AUDIT] 设备命令 {device.Name} ({device.DeviceId}) 通道{action.Outlet} -> {action.State} IP={device.IpAddress} 结果={(success ? "ok" : "fail")}");
         }
         catch (Exception ex)
         {
