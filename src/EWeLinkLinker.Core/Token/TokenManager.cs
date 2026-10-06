@@ -57,7 +57,8 @@ public class TokenManager(CloudClient cloudClient, string configPath) : IDisposa
         // H-? 修复：防止空 UserApiKey 覆盖已有的有效 key（某些刷新响应不含 apikey 字段）
         if (!string.IsNullOrEmpty(newTokens.UserApiKey))
             freshConfig.Tokens.UserApiKey = newTokens.UserApiKey;
-        freshConfig.Save(configPath);
+        if (!freshConfig.Save(configPath))
+            Logging.SimpleLogger.Log($"[Token] 刷新后的 token 未能写入配置，下次仍会用旧 token: {configPath}");
 
         return newTokens;
     }
@@ -109,7 +110,8 @@ public class TokenManager(CloudClient cloudClient, string configPath) : IDisposa
             config.Tokens.AccessToken = tokens.AccessToken;
             config.Tokens.RefreshToken = tokens.RefreshToken;
             config.Tokens.UserApiKey = tokens.UserApiKey;
-            config.Save(configPath);
+            if (!config.Save(configPath))
+                Logging.SimpleLogger.Log($"[Token] 纠正区域后的 token 未能写入配置: {configPath}");
             return tokens;
         }
     }
@@ -126,7 +128,8 @@ public class TokenManager(CloudClient cloudClient, string configPath) : IDisposa
         config.Tokens.AccessToken = tokens.AccessToken;
         config.Tokens.RefreshToken = tokens.RefreshToken;
         config.Tokens.UserApiKey = tokens.UserApiKey;
-        config.Save(configPath);
+        if (!config.Save(configPath))
+            Logging.SimpleLogger.Log($"[Token] 登录得到的 token 未能写入配置: {configPath}");
     }
 }
 

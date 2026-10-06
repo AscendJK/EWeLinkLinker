@@ -24,6 +24,8 @@ public class LinkerConfig
 
     private static readonly byte[] Entropy = Encoding.UTF8.GetBytes("EWeLinkLinker_v1");
 
+    private const int CrossProcessLockTimeoutMs = 1500;
+
     internal static string Protect(string? plainText)
     {
         if (string.IsNullOrEmpty(plainText)) return string.Empty;
@@ -104,38 +106,53 @@ public class LinkerConfig
         }
     }
 
-    public bool Save(string path)
+    /// <summary>
+    /// 跨进程独占锁用锁文件（FileShare.None），不用命名 Mutex：命名 Mutex 需要
+    /// SeCreateGlobalPrivilege，用户态 ConfigApp 建不了 Global\ 对象，只会静默退回进程内锁，
+    /// 于是服务（session 0）与 ConfigApp 实际并不互斥。锁文件句柄由内核管理，
+    /// 进程崩溃即自动释放，不会留下残留锁。
+    /// 返回 null 表示没抢到或没有权限——调用方 best-effort 继续写，
+    /// 不把一次本来写得成的保存变成失败。
+    /// </summary>
+    private static FileStream? TryAcquireFileLock(string path)
     {
-        // 命名 Mutex 用于跨进程互斥（ConfigApp <-> 服务进程）.
-        // 必须用 Global\ 前缀——Windows 服务在 session 0，ConfigApp 在 session 1+，
-        // 会话级 Mutex 无法跨 session。ConfigApp 用户态进程可能没有
-        // SeCreateGlobalPrivilege 权限，此时抛 UnauthorizedAccessException，回退到进程内锁。
-        System.Threading.Mutex? mutex = null;
-        bool mutexAcquired = false;
-        try
+        var dir = Path.GetDirectoryName(path);
+        if (string.IsNullOrEmpty(dir)) return null;
+
+        // 前导点：FileSystemWatcher 的 Filter 是前缀匹配，
+        // "linker.json.lock" 会被 "linker.json" 命中，不能让它去触发重载
+        var lockPath = Path.Combine(dir, "." + Path.GetFileName(path) + ".lock");
+        var deadline = Environment.TickCount64 + CrossProcessLockTimeoutMs;
+
+        while (true)
         {
             try
             {
-                var mutexName = @"Global\EWeLinkLinker_Config_" + path.Replace('\\', '_').Replace('/', '_');
-                mutex = new System.Threading.Mutex(false, mutexName);
-                mutexAcquired = mutex.WaitOne(TimeSpan.FromSeconds(1.5));
-                if (!mutexAcquired)
+                return new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            }
+            catch (IOException)
+            {
+                if (Environment.TickCount64 >= deadline)
                 {
-                    System.Diagnostics.Debug.WriteLine($"Config save timeout: {path}");
-                    return false;
+                    System.Diagnostics.Debug.WriteLine($"Config lock contended, saving without it: {path}");
+                    return null;
                 }
+                Thread.Sleep(20);
             }
-            catch (UnauthorizedAccessException)
+            catch (Exception ex)
             {
-                // ConfigApp 用户态进程无 SeCreateGlobalPrivilege 权限
-                // 回退到进程内锁（进程内 PathLocks 仍能防止同进程并发写）
-                System.Diagnostics.Debug.WriteLine($"Global mutex not available (user mode), using process-level lock: {path}");
+                System.Diagnostics.Debug.WriteLine($"Config lock unavailable ({ex.GetType().Name}), saving without it: {path}");
+                return null;
             }
-            catch (AbandonedMutexException)
-            {
-                // 另一进程持有 Mutex 时崩溃，我们已获取所有权
-                mutexAcquired = true;
-            }
+        }
+    }
+
+    public bool Save(string path)
+    {
+        FileStream? fileLock = null;
+        try
+        {
+            fileLock = TryAcquireFileLock(path);
 
             var dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
@@ -167,8 +184,7 @@ public class LinkerConfig
         }
         finally
         {
-            if (mutexAcquired) mutex?.ReleaseMutex();
-            mutex?.Dispose();
+            fileLock?.Dispose();
         }
     }
 
