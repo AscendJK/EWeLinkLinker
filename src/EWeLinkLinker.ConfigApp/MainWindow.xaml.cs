@@ -12,6 +12,7 @@ using EWeLinkLinker.Core.Cloud;
 using EWeLinkLinker.Core.Config;
 using EWeLinkLinker.Core.Lan;
 using EWeLinkLinker.Core.Models;
+using EWeLinkLinker.Core.Token;
 using EWeLinkLinker.Core.Triggers;
 
 namespace EWeLinkLinker.ConfigApp;
@@ -24,12 +25,14 @@ public partial class MainWindow : Window, IDisposable
     private readonly HttpClient _lanHttpClient;
     private readonly string _configPath;
     private readonly string _logPath;
+    private readonly TokenManager _tokenManager;
 
     private List<DeviceInfo> _allDevices = new();
     private ObservableCollection<LinkerRule> _rules = new();
     private string _userApiKey = string.Empty;
     private string _accessToken = string.Empty;
     private string _refreshToken = string.Empty;
+    private DateTime? _tokenObtainedAtUtc;
     private bool _disposed;
 
     private bool _isLoggingIn;
@@ -60,6 +63,7 @@ public partial class MainWindow : Window, IDisposable
         Directory.CreateDirectory(configDir);
         _configPath = Path.Combine(configDir, "linker.json");
         _logPath = Path.Combine(configDir, "debug.log");
+        _tokenManager = new TokenManager(_cloudClient, _configPath);
 
         Core.Logging.SimpleLogger.Initialize(_logPath);
         Core.Logging.SimpleLogger.TrimLog();
@@ -96,6 +100,7 @@ public partial class MainWindow : Window, IDisposable
         if (_disposed) return;
         _disposed = true;
         _serviceStatusTimer.Stop();
+        _tokenManager.Dispose();
         _cloudHttpClient.Dispose();
         _lanHttpClient.Dispose();
     }
@@ -145,6 +150,7 @@ public partial class MainWindow : Window, IDisposable
             _userApiKey = config.Tokens.UserApiKey;
             _accessToken = config.Tokens.AccessToken;
             _refreshToken = config.Tokens.RefreshToken;
+            _tokenObtainedAtUtc = config.Tokens.TokenObtainedAtUtc;
             _allDevices = config.Devices;
             Devices.Clear();
             foreach (var d in _allDevices) Devices.Add(d);
@@ -274,12 +280,14 @@ public partial class MainWindow : Window, IDisposable
             var accessToken = _accessToken;
             var refreshToken = _refreshToken;
             var userApiKey = _userApiKey;
+            var tokenObtainedAtUtc = _tokenObtainedAtUtc;
             if (!string.IsNullOrEmpty(existingConfig.Tokens.AccessToken)
                 && existingConfig.Tokens.AccessToken != _accessToken)
             {
                 accessToken = existingConfig.Tokens.AccessToken;
                 refreshToken = existingConfig.Tokens.RefreshToken;
                 userApiKey = existingConfig.Tokens.UserApiKey;
+                tokenObtainedAtUtc = existingConfig.Tokens.TokenObtainedAtUtc;
                 Log("[保存] 检测到服务端已刷新 token，使用磁盘版本");
             }
 
@@ -296,7 +304,8 @@ public partial class MainWindow : Window, IDisposable
                 {
                     AccessToken = accessToken,
                     RefreshToken = refreshToken,
-                    UserApiKey = userApiKey
+                    UserApiKey = userApiKey,
+                    TokenObtainedAtUtc = tokenObtainedAtUtc
                 },
                 Devices = _allDevices,
                 Rules = rulesList,
@@ -382,7 +391,8 @@ public partial class MainWindow : Window, IDisposable
                 {
                     AccessToken = _accessToken,
                     RefreshToken = _refreshToken,
-                    UserApiKey = _userApiKey
+                    UserApiKey = _userApiKey,
+                    TokenObtainedAtUtc = _tokenObtainedAtUtc
                 },
                 Devices = devicesToSave,
                 Rules = existingConfig.Rules,  // M-6 修复：登录时保留旧规则，不覆盖
@@ -1563,6 +1573,7 @@ public partial class MainWindow : Window, IDisposable
             _userApiKey = tokens.UserApiKey;
             _accessToken = tokens.AccessToken;
             _refreshToken = tokens.RefreshToken;
+            _tokenObtainedAtUtc = DateTime.UtcNow;
 
             // Bug 修复：先保存 Token（不保存设备列表），然后获取云端设备并合并旧 MAC 地址
             SaveTokensOnly();
@@ -1677,8 +1688,8 @@ public partial class MainWindow : Window, IDisposable
             var token = SyncAccessTokenFromDisk();
             if (string.IsNullOrEmpty(token))
             {
-                Log("[刷新状态] 没有可用的访问令牌，直接尝试登录一次");
-                cloudDevices = await ReloginAndFetchDevicesAsync();
+                Log("[刷新状态] 没有可用的访问令牌，直接走自愈阶梯");
+                cloudDevices = await RecoverFromAuthFailureAsync();
                 renewedByRelogin = true;
             }
             else
@@ -1689,8 +1700,8 @@ public partial class MainWindow : Window, IDisposable
                 }
                 catch (CloudApiException ex) when (ex.IsAuthFailure)
                 {
-                    Log($"[刷新状态] 凭证失效（error={ex.ErrorCode} {ex.CloudMessage}），自动重新登录一次");
-                    cloudDevices = await ReloginAndFetchDevicesAsync();
+                    Log($"[刷新状态] 凭证失效（error={ex.ErrorCode} {ex.CloudMessage}），走自愈阶梯");
+                    cloudDevices = await RecoverFromAuthFailureAsync();
                     renewedByRelogin = true;
                 }
             }
@@ -1736,9 +1747,7 @@ public partial class MainWindow : Window, IDisposable
             if (!string.IsNullOrEmpty(disk.AccessToken) && disk.AccessToken != _accessToken)
             {
                 Log("[刷新状态] 采用磁盘上更新的 token（服务端刷新过）");
-                _accessToken = disk.AccessToken;
-                _refreshToken = disk.RefreshToken;
-                _userApiKey = disk.UserApiKey;
+                AdoptTokens(disk.AccessToken, disk.RefreshToken, disk.UserApiKey, disk.TokenObtainedAtUtc);
             }
         }
         catch (Exception ex)
@@ -1749,12 +1758,34 @@ public partial class MainWindow : Window, IDisposable
         return _accessToken;
     }
 
-    /// <summary>
-    /// 用界面上的账号密码静默重登一次并取设备列表。只给一次机会，且一分钟内不重复——
-    /// 密码若在别处改过，反复打登录接口只会把账号打进锁定。
-    /// </summary>
-    private async Task<List<DeviceInfo>> ReloginAndFetchDevicesAsync()
+    private void AdoptTokens(string accessToken, string refreshToken, string userApiKey, DateTime? obtainedAtUtc)
     {
+        _accessToken = accessToken;
+        _refreshToken = refreshToken;
+        if (!string.IsNullOrEmpty(userApiKey)) _userApiKey = userApiKey;
+        _tokenObtainedAtUtc = obtainedAtUtc;
+    }
+
+    /// <summary>
+    /// 凭证被云端拒绝后的自愈阶梯。先只拿 refresh token 换新的：它不要密码，而且按官方口径
+    /// 401（账号在别处登录把这份 token 顶掉）也是它就能救的那种。换不动才动用账号密码重新登录——
+    /// 登录会把上一份 token 顶掉，是更重的一锤，且一分钟内只敲一次：密码若在别处改过，
+    /// 反复打登录接口只会把账号打进锁定。
+    /// </summary>
+    private async Task<List<DeviceInfo>> RecoverFromAuthFailureAsync()
+    {
+        try
+        {
+            var refreshed = await _tokenManager.RefreshNowAsync();
+            AdoptTokens(refreshed.AccessToken, refreshed.RefreshToken, refreshed.UserApiKey, DateTime.UtcNow);
+            Log("[刷新状态] 已用 refresh token 换新凭证");
+            return await _cloudClient.GetDevicesAsync(refreshed.AccessToken);
+        }
+        catch (Exception ex)
+        {
+            Log($"[刷新状态] refresh token 换不动（{ex.Message}），改用账号密码重新登录");
+        }
+
         if (DateTime.UtcNow - _lastAutoReloginUtc < AutoReloginCooldown)
             throw new Exception("云端登录已过期，自动重登刚试过不到一分钟。请确认账号密码后点「登录获取设备」。");
         _lastAutoReloginUtc = DateTime.UtcNow;
@@ -1767,9 +1798,7 @@ public partial class MainWindow : Window, IDisposable
         var region = RegionComboBox.Text;
         _cloudClient.Region = region;
         var (tokens, _) = await _cloudClient.LoginAsync(account, password, GetCountryCodeForRegion(region));
-        _accessToken = tokens.AccessToken;
-        _refreshToken = tokens.RefreshToken;
-        _userApiKey = tokens.UserApiKey;
+        AdoptTokens(tokens.AccessToken, tokens.RefreshToken, tokens.UserApiKey, DateTime.UtcNow);
         SaveTokensOnly();
         Log("[刷新状态] 自动重新登录成功，新 token 已写入配置");
 
