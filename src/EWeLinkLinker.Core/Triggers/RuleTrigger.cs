@@ -42,6 +42,7 @@ public sealed class RuleTrigger : IDisposable, IPostPollCallback
                 Type = condition.Type,
                 Parameter = condition.Parameter,
                 Parameter2 = condition.Parameter2,
+                ReleaseParameter = condition.ReleaseParameter,
                 Comparison = condition.Comparison
             };
             var trigger = TriggerRegistry.Create(config);

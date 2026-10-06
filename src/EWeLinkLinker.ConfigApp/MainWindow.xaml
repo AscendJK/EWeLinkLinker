@@ -340,6 +340,7 @@
 
                                                                     <!-- 比较运算符 -->
                                                                     <ComboBox Grid.Column="2" SelectedValue="{Binding Comparison}"
+                                                                              SelectionChanged="ComparisonComboBox_SelectionChanged"
                                                                               Margin="0,0,4,0" FontSize="11" VerticalAlignment="Center"
                                                                               Visibility="{Binding ShowComparison, Converter={StaticResource BoolToVis}}">
                                                                         <ComboBox.ItemsSource>
@@ -377,6 +378,15 @@
                                                                                      Style="{StaticResource ModernTextBox}"
                                                                                      Text="{Binding Parameter, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
                                                                                      Visibility="{Binding IsRangeComparison, Converter={StaticResource InverseBoolToVis}}"/>
+                                                                            <!-- 滞回解除线：仅数值条件 + 单向比较可用，留空=不启用 -->
+                                                                            <TextBlock Text="解除" FontSize="10" Foreground="Gray"
+                                                                                       VerticalAlignment="Center" Margin="6,0,2,0"
+                                                                                       Visibility="{Binding ShowRelease, Converter={StaticResource BoolToVis}}"/>
+                                                                            <TextBox FontSize="11" TextAlignment="Center" VerticalContentAlignment="Center" Width="45"
+                                                                                     Style="{StaticResource ModernTextBox}"
+                                                                                     ToolTip="滞回解除线：条件满足后要越过此值才重新武装，用于抑制阈值附近的读数抖动。留空表示不启用。"
+                                                                                     Text="{Binding ReleaseParameter, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
+                                                                                     Visibility="{Binding ShowRelease, Converter={StaticResource BoolToVis}}"/>
                                                                             <!-- 范围输入（双值） -->
                                                                             <StackPanel Orientation="Horizontal" VerticalAlignment="Center"
                                                                                         Visibility="{Binding IsRangeComparison, Converter={StaticResource BoolToVis}}">

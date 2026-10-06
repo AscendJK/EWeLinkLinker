@@ -85,6 +85,7 @@ public partial class RuleCondition : ObservableObject
                 OnPropertyChanged(nameof(ParameterPlaceholder));
                 OnPropertyChanged(nameof(ParameterUnit));
                 OnPropertyChanged(nameof(ShowComparison));
+                OnPropertyChanged(nameof(ShowRelease));
             }
         }
     }
@@ -107,6 +108,17 @@ public partial class RuleCondition : ObservableObject
     }
 
     /// <summary>
+    /// 滞回解除线：数值条件触发后，实际值要越过这条线才重新武装。
+    /// 留空表示不启用滞回，维持"不满足即复位"的原行为。
+    /// </summary>
+    private string _releaseParameter = "";
+    public string ReleaseParameter
+    {
+        get => _releaseParameter;
+        set => SetProperty(ref _releaseParameter, value);
+    }
+
+    /// <summary>
     /// 比较运算符
     /// </summary>
     private ComparisonOperator _comparison = ComparisonOperator.Gte;
@@ -118,6 +130,7 @@ public partial class RuleCondition : ObservableObject
             if (SetProperty(ref _comparison, value))
             {
                 OnPropertyChanged(nameof(IsRangeComparison));
+                OnPropertyChanged(nameof(ShowRelease));
             }
         }
     }
@@ -191,6 +204,17 @@ public partial class RuleCondition : ObservableObject
 
     [System.Text.Json.Serialization.JsonIgnore]
     public bool IsRangeComparison => Comparison == ComparisonOperator.Range || Comparison == ComparisonOperator.OutsideRange;
+
+    /// <summary>
+    /// 只有温度/使用率 + 单向比较才支持解除线（范围/相等/时间/间隔/进程/电源都不适用）
+    /// </summary>
+    public static bool SupportsRelease(string type, ComparisonOperator comparison) =>
+        (type is "cpu_temp" or "cpu_usage" or "gpu_temp") &&
+        comparison is ComparisonOperator.Gte or ComparisonOperator.Gt
+            or ComparisonOperator.Lte or ComparisonOperator.Lt;
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool ShowRelease => SupportsRelease(Type, Comparison);
 
     /// <summary>
     /// 参数范围提示文本

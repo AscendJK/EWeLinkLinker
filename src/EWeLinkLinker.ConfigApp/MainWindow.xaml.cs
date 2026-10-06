@@ -239,6 +239,29 @@ public partial class MainWindow : Window, IDisposable
         try
         {
             var rulesList = _rules.ToList();
+
+            // 保存前校验解除线：方向填反了会让条件一旦满足就永不重新武装，
+            // 且服务端构造触发器时会抛异常、这条规则静默失效，所以必须拦在写入之前。
+            foreach (var rule in rulesList)
+            {
+                foreach (var cond in rule.Conditions)
+                {
+                    if (!cond.ShowRelease)
+                    {
+                        cond.ReleaseParameter = ""; // 输入框已隐藏，残留值不写入配置
+                        continue;
+                    }
+                    if (!ComparisonHelper.ValidateRelease(cond.Parameter, cond.ReleaseParameter,
+                                                          cond.Comparison, out var releaseError))
+                    {
+                        Log($"[保存] 中止：规则 [{rule.Name}] 解除线校验失败 -> {releaseError}");
+                        MessageBox.Show($"规则「{rule.Name}」的解除线有问题：\n\n{releaseError}",
+                                        "无法保存", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        return;
+                    }
+                }
+            }
+
             // 加载现有配置以保留 LoggingEnabled 等设置
             var existingConfig = LinkerConfig.Load(_configPath);
 
@@ -717,8 +740,27 @@ public partial class MainWindow : Window, IDisposable
                             condition.Comparison = ComparisonOperator.Gte;
                         break;
                 }
+
+                // 切换后若已不适用解除线（如换成 time/进程/电源），清掉残留值
+                if (!condition.ShowRelease)
+                    condition.ReleaseParameter = "";
             }
         }
+    }
+
+    /// <summary>
+    /// 比较符切换：改成 Eq/Neq/Range/OutsideRange 后解除线不再适用，清掉残留值，
+    /// 避免把用户看不见的值带进保存与服务端校验。
+    /// 用 AddedItems 里的新值判断而不是 condition.Comparison，因为绑定回写可能还没发生。
+    /// </summary>
+    private void ComparisonComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (e.RemovedItems.Count == 0) return; // 初始化绑定不处理
+        if (sender is not ComboBox { DataContext: RuleCondition condition }) return;
+        if (e.AddedItems.Count == 0 || e.AddedItems[0] is not ComparisonOperator newComparison) return;
+
+        if (!RuleCondition.SupportsRelease(condition.Type, newComparison))
+            condition.ReleaseParameter = "";
     }
 
     private void RemoveCondition_Click(object sender, RoutedEventArgs e)

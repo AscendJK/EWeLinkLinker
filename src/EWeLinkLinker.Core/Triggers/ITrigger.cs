@@ -63,6 +63,8 @@ public class TriggerConfig
     public string Type { get; set; } = "";
     public string Parameter { get; set; } = "";
     public string Parameter2 { get; set; } = "";
+    /// <summary>滞回解除线；为空表示不启用滞回（维持原有边沿行为）</summary>
+    public string ReleaseParameter { get; set; } = "";
     public ComparisonOperator Comparison { get; set; } = ComparisonOperator.Gte;
     public string Comparer { get; set; } = "and"; // 保留用于兼容
 

@@ -5,7 +5,8 @@ namespace EWeLinkLinker.Core.Triggers;
 /// <summary>
 /// 比较运算辅助类
 /// </summary>
-internal static class ComparisonHelper
+// 需要被 ConfigApp 调用（保存前校验解除线方向），所以是 public 而非 internal
+public static class ComparisonHelper
 {
     /// <summary>
     /// 根据比较运算符判断值是否满足条件
@@ -72,6 +73,72 @@ internal static class ComparisonHelper
             }
         }
         return Evaluate(actualValue, parameter, parameter2, comparison);
+    }
+
+    /// <summary>
+    /// 滞回：已锁存的条件现在该不该放开。解除线为空时返回 true，
+    /// 等价于"不满足即放开"，即完全维持旧行为。
+    /// 上升型（≥ / &gt;）要跌破解除线，下降型（≤ / &lt;）要越过解除线。
+    /// </summary>
+    public static bool IsReleased(float actualValue, string? releaseParameter, ComparisonOperator comparison)
+    {
+        // 读数失效时不额外锁住状态，交由调用方的安全失败处理
+        if (float.IsNaN(actualValue)) return true;
+        if (!float.TryParse(releaseParameter, out var release)) return true;
+
+        return comparison switch
+        {
+            ComparisonOperator.Gte or ComparisonOperator.Gt => actualValue < release,
+            ComparisonOperator.Lte or ComparisonOperator.Lt => actualValue > release,
+            _ => true
+        };
+    }
+
+    /// <summary>
+    /// 校验解除线是否在触发线的另一侧。填反了会导致条件一旦满足就永不重新武装，
+    /// 所以要么保存时报错，要么触发器构造时拒绝加载。空解除线 = 不启用滞回，直接通过。
+    /// </summary>
+    public static bool ValidateRelease(string triggerParameter, string? releaseParameter,
+                                       ComparisonOperator comparison, out string? errorMessage)
+    {
+        errorMessage = null;
+        if (string.IsNullOrWhiteSpace(releaseParameter)) return true;
+
+        if (!float.TryParse(triggerParameter, out var trigger))
+        {
+            errorMessage = "触发阈值不是数字，无法校验解除线";
+            return false;
+        }
+        if (!float.TryParse(releaseParameter, out var release))
+        {
+            errorMessage = "解除线必须是数字";
+            return false;
+        }
+
+        switch (comparison)
+        {
+            case ComparisonOperator.Gte:
+            case ComparisonOperator.Gt:
+                if (release >= trigger)
+                {
+                    errorMessage = $"解除线必须小于触发阈值 {trigger:0.##}（当前填的是 {release:0.##}），否则条件一旦满足就再也无法重新触发";
+                    return false;
+                }
+                break;
+            case ComparisonOperator.Lte:
+            case ComparisonOperator.Lt:
+                if (release <= trigger)
+                {
+                    errorMessage = $"解除线必须大于触发阈值 {trigger:0.##}（当前填的是 {release:0.##}），否则条件一旦满足就再也无法重新触发";
+                    return false;
+                }
+                break;
+            default:
+                errorMessage = "解除线只支持 ≥ > ≤ < 这几种比较方式";
+                return false;
+        }
+
+        return true;
     }
 
     private static float ParseSingle(string parameter)

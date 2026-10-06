@@ -12,6 +12,7 @@ public class CpuUsageTrigger : OptimizedTriggerBase
 {
     private readonly string _parameter;
     private readonly string _parameter2;
+    private readonly string _releaseParameter;
     private readonly ComparisonOperator _comparison;
     private bool _wasTriggered;
     private int _pollCount;
@@ -30,10 +31,14 @@ public class CpuUsageTrigger : OptimizedTriggerBase
     {
         _parameter = config.Parameter;
         _parameter2 = config.Parameter2;
+        _releaseParameter = config.ReleaseParameter;
         _comparison = config.Comparison;
 
         if (!float.TryParse(config.Parameter, out _))
             throw new ArgumentException("使用率阈值必须为数字");
+
+        if (!ComparisonHelper.ValidateRelease(config.Parameter, _releaseParameter, _comparison, out var releaseError))
+            throw new ArgumentException(releaseError);
     }
 
     public override bool ValidateParameter(string parameter, out string? errorMessage)
@@ -62,7 +67,9 @@ public class CpuUsageTrigger : OptimizedTriggerBase
         // 读取失败（NaN）时不触发也不复位，保持当前状态（与温度触发器一致，安全失败）
         if (float.IsNaN(usage)) return ValueTask.FromResult(false);
 
-        var isTriggered = ComparisonHelper.Evaluate(usage, _parameter, _parameter2, _comparison);
+        // 滞回：已锁存时，只有越过解除线才算不再满足
+        var isTriggered = ComparisonHelper.Evaluate(usage, _parameter, _parameter2, _comparison)
+                          || (_wasTriggered && !ComparisonHelper.IsReleased(usage, _releaseParameter, _comparison));
 
         _pollCount++;
         if (_pollCount % 10 == 0)

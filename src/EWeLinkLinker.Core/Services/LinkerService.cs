@@ -136,6 +136,7 @@ public class LinkerService
                     Type = condition.Type,
                     Parameter = condition.Parameter,
                     Parameter2 = condition.Parameter2,
+                    ReleaseParameter = condition.ReleaseParameter,
                     Comparison = condition.Comparison
                 };
                 using var trigger = TriggerRegistry.Create(config);
