@@ -105,7 +105,12 @@ public sealed class TriggerManager : IAsyncDisposable
     /// </summary>
     public async ValueTask StartAllAsync()
     {
-        _scheduler?.Start();
+        if (_scheduler == null) return;
+
+        // 先建立基线再开轮询，否则重启会把当下已满足的规则当作新跳变重发一遍动作
+        await SeedInitialStateAsync();
+
+        _scheduler.Start();
         _logger.LogListenerStarted("PollingScheduler", $"{_pollingIntervalSeconds}s");
 
         // 记录每个触发器的状态
@@ -115,6 +120,24 @@ public sealed class TriggerManager : IAsyncDisposable
         }
 
         _logger.Info($"已启动 {_ruleTriggers.Count} 条规则的监控");
+    }
+
+    /// <summary>
+    /// 逐个条件读一次传感器，把状态刷成当前实际值。只调用 PollAsync，
+    /// 不经过 OnPollingComplete，所以这一轮不会执行任何设备动作。
+    /// PollAsync 自己吞异常并转成 Error 状态，这里不再包 try。
+    /// </summary>
+    private async ValueTask SeedInitialStateAsync()
+    {
+        foreach (var trigger in _ruleTriggers.Values.SelectMany(rt => rt.GetTriggers()))
+        {
+            await trigger.PollAsync();
+        }
+
+        foreach (var ruleTrigger in _ruleTriggers.Values)
+        {
+            ruleTrigger.SeedBaseline();
+        }
     }
 
     /// <summary>

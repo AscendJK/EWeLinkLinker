@@ -99,6 +99,21 @@ public sealed class RuleTrigger : IDisposable, IPostPollCallback
     }
 
     /// <summary>
+    /// 建立启动基线：把当前复合结果记为「已经有过」的状态，使服务重启或触发器重建后，
+    /// 原本就已满足的规则不会在第一轮被当成新跳变而重发设备动作。
+    /// 由 TriggerManager 在启动调度器之前调用，此时 OnPollingComplete 还没跑过。
+    /// </summary>
+    public void SeedBaseline()
+    {
+        lock (_evalLock)
+        {
+            _previousCompositeResult = EvaluateCompositeCondition();
+            if (_previousCompositeResult)
+                _logger.Info($"规则 [{_rule.Name}] 启动时条件已满足，按基线处理（本次不执行动作）");
+        }
+    }
+
+    /// <summary>
     /// 评估复合条件（返回当前是否满足）
     /// 支持标准布尔优先级：AND > OR
     /// </summary>
