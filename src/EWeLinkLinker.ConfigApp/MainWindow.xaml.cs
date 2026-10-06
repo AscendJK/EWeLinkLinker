@@ -1811,6 +1811,8 @@ public partial class MainWindow : Window, IDisposable
 
         try
         {
+            var withIpBefore = _allDevices.Count(d => !string.IsNullOrEmpty(d.IpAddress));
+
             // DiscoverDevicesAsync 修改设备对象本身（设置 IPAddress），不需要重新创建集合
             _allDevices = await _lanClient.DiscoverDevicesAsync(_allDevices);
             // 修复：检查窗口是否已关闭
@@ -1818,8 +1820,10 @@ public partial class MainWindow : Window, IDisposable
             {
                 // 只刷新 UI，不清除集合（避免 ComboBox 失去选中项）
                 await Dispatcher.InvokeAsync(RebuildDeviceCards);
-                // Bug 修复：自动发现 IP 后保存配置
-                SaveConfig();
+                // 只在真发现了新 IP 时才写盘：那几台只能走云端的设备永远没 IP，
+                // 无条件保存会让"打开工具"每次都改一次配置文件
+                if (_allDevices.Count(d => !string.IsNullOrEmpty(d.IpAddress)) > withIpBefore)
+                    SaveConfig();
             }
         }
         catch { }
