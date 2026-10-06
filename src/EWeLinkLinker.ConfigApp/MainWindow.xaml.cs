@@ -273,7 +273,8 @@ public partial class MainWindow : Window, IDisposable
                 },
                 Devices = _allDevices,
                 Rules = rulesList,
-                LoggingEnabled = existingConfig.LoggingEnabled  // 保留日志开关设置
+                LoggingEnabled = existingConfig.LoggingEnabled,  // 保留日志开关设置
+                PollingIntervalSeconds = existingConfig.PollingIntervalSeconds  // 保留轮询间隔设置
             };
 
             // 详细调试日志
