@@ -179,26 +179,35 @@ public class CloudClient
         request.Headers.Add("Authorization", $"Bearer {accessToken}");
 
         using var response = await _http.SendAsync(request);
+        var status = (int)response.StatusCode;
 
         if (!response.IsSuccessStatusCode)
         {
             var errorBody = await response.Content.ReadAsStringAsync();
-            SimpleLogger.Log($"[Cloud] GetDevices failed: HTTP {(int)response.StatusCode}, {errorBody}");
-            response.EnsureSuccessStatusCode();
+            // body 只进日志不进异常消息：异常消息会原样弹到界面上
+            SimpleLogger.Log($"[Cloud] GetDevices failed: HTTP {status}, {Truncate(errorBody, 200)}");
+            throw new CloudApiException($"云端返回 HTTP {status}", status, null, null, status is 401 or 403);
         }
 
         var json = await response.Content.ReadAsStringAsync();
 
-        using var doc = JsonDocument.Parse(json);
+        using var doc = ParseBodyOrThrow(json, status, response.Content.Headers.ContentType?.ToString());
+
+        // 云端把业务错误装在 HTTP 200 里回。实测凭证失效时是
+        // {"error":401,"msg":"cannot found access token info","data":{}} —— data 在但没有 thingList。
+        // 不先看 error，"登录过期"就会被报成"返回结构异常"，谁也看不出该重新登录。
+        ThrowIfCloudError(doc.RootElement, status);
 
         if (!doc.RootElement.TryGetProperty("data", out var data) ||
             !data.TryGetProperty("thingList", out var thingList) ||
             thingList.ValueKind != JsonValueKind.Array)
         {
-            SimpleLogger.Log("[Cloud] GetDevices: unexpected response structure");
             // 结构异常不是"0 个设备"。返回空表会让调用方把设备列表覆盖成空，
-            // 连带把规则里的 DeviceId 写成 null，所以要明确失败
-            throw new InvalidOperationException("云端设备列表返回结构异常，已中止（设备与规则未做任何改动）");
+            // 连带把规则里的 DeviceId 写成 null，所以要明确失败。
+            // 只记顶层键名，不记 body——正常响应里含 deviceKey。
+            var rootKeys = string.Join(",", doc.RootElement.EnumerateObject().Select(p => p.Name));
+            SimpleLogger.Log($"[Cloud] GetDevices: unexpected response structure, HTTP {status}, root=[{rootKeys}]");
+            throw new CloudApiException("云端设备列表返回结构异常，已中止（设备与规则未做任何改动）", status, null, null, false);
         }
 
         var devices = new List<DeviceInfo>();
@@ -251,6 +260,64 @@ public class CloudClient
         SimpleLogger.Log($"[Cloud] GetDevices: {devices.Count} devices");
         return devices;
     }
+
+    private static JsonDocument ParseBodyOrThrow(string json, int status, string? contentType)
+    {
+        try
+        {
+            return JsonDocument.Parse(json);
+        }
+        catch (JsonException)
+        {
+            // 不记 body：它可能是整页网关 HTML，也可能含设备密钥
+            SimpleLogger.Log($"[Cloud] GetDevices: body 不是 JSON, HTTP {status}, type={contentType}, len={json.Length}");
+            throw new CloudApiException("云端返回了无法解析的内容，已中止（设备与规则未做任何改动）", status, null, null, false);
+        }
+    }
+
+    /// <summary>
+    /// 顶层 error 非 0 就是云端明确报了错，只是它披着 HTTP 200。
+    /// 401/403 或 msg 提到 access token 的，归成"凭证失效"——界面据此才能说"该重新登录"而不是"结构异常"。
+    /// </summary>
+    private static void ThrowIfCloudError(JsonElement root, int status)
+    {
+        // TryGetInt32 只对 Number 生效，遇到 "error":"401" 这种字符串会直接抛 InvalidOperationException
+        if (!root.TryGetProperty("error", out var errorEl) ||
+            errorEl.ValueKind != JsonValueKind.Number ||
+            !errorEl.TryGetInt32(out var code) || code == 0)
+            return;
+
+        var cloudMsg = root.TryGetProperty("msg", out var msgEl) && msgEl.ValueKind == JsonValueKind.String
+            ? msgEl.GetString()
+            : null;
+        var isAuthFailure = code is 401 or 403 ||
+            cloudMsg?.Contains("access token", StringComparison.OrdinalIgnoreCase) == true ||
+            cloudMsg?.Contains("unauthorized", StringComparison.OrdinalIgnoreCase) == true;
+
+        SimpleLogger.Log($"[Cloud] GetDevices: HTTP {status}, error={code}, msg={cloudMsg}");
+        throw new CloudApiException(
+            isAuthFailure ? "云端登录已过期或凭证无效" : $"云端返回错误 {code}：{cloudMsg ?? "无说明"}",
+            status, code, cloudMsg, isAuthFailure);
+    }
+
+    private static string Truncate(string? value, int max) =>
+        string.IsNullOrEmpty(value) || value.Length <= max
+            ? value ?? string.Empty
+            : value[..max] + "…";
+}
+
+/// <summary>
+/// 云端调用失败。带上 HTTP 状态、云端自己的 error/msg，以及 IsAuthFailure——
+/// 让调用方能区分"凭证要重新登录"和"接口/网络出问题了"，而不是把所有失败糊成一句"返回结构异常"。
+/// Message 是给人看的，不含响应体原文。
+/// </summary>
+public class CloudApiException(string message, int? httpStatus, int? errorCode, string? cloudMessage, bool isAuthFailure)
+    : Exception(message)
+{
+    public int? HttpStatus { get; } = httpStatus;
+    public int? ErrorCode { get; } = errorCode;
+    public string? CloudMessage { get; } = cloudMessage;
+    public bool IsAuthFailure { get; } = isAuthFailure;
 }
 
 public class WrongRegionException : Exception
