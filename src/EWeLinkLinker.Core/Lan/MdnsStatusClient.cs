@@ -21,11 +21,30 @@ public class MdnsStatusClient
 
     public sealed record LanDeviceStatus(string DeviceId, Dictionary<int, bool> Channels, int Seq, string SourceIp);
 
+    /// <summary>局域网这一段这次到底发生了什么——"读到"和"没读到"在界面上必须是不同的话。</summary>
+    public enum LanAttempt
+    {
+        /// <summary>至少读到一台。</summary>
+        Read,
+        /// <summary>问了，但一台都没应答（设备掉线、换了 IP、被交换机隔离）。</summary>
+        NoResponder,
+        /// <summary>根本没问：配置里没有一台同时有 IP 和密钥。</summary>
+        NoTargets,
+        /// <summary>根本没问：本机 5353 端口没绑上。</summary>
+        SocketFailed,
+    }
+
+    public sealed record LanStatusResult(
+        Dictionary<string, LanDeviceStatus> Devices,
+        int TargetsTried,
+        LanAttempt Attempt,
+        List<string> UnansweredNames);
+
     /// <summary>
     /// 发一次查询、收到 timeout 为止。返回的键是 deviceid（小写）；
     /// 没出现在结果里只代表"这次局域网没读到"，不能当成设备离线。
     /// </summary>
-    public async Task<Dictionary<string, LanDeviceStatus>> QueryStatusAsync(
+    public async Task<LanStatusResult> QueryStatusAsync(
         IReadOnlyList<DeviceInfo> devices, TimeSpan timeout, CancellationToken ct = default)
     {
         var targets = new Dictionary<string, DeviceInfo>();
@@ -37,7 +56,11 @@ public class MdnsStatusClient
         }
 
         var result = new Dictionary<string, LanDeviceStatus>();
-        if (targets.Count == 0) return result;
+        if (targets.Count == 0)
+        {
+            SimpleLogger.Log("[LanStatus] 没有可走局域网的设备（缺 IP 或密钥），本次未查询");
+            return new LanStatusResult(result, 0, LanAttempt.NoTargets, new List<string>());
+        }
 
         UdpClient udp;
         try
@@ -47,7 +70,8 @@ public class MdnsStatusClient
         catch (Exception ex)
         {
             SimpleLogger.Log($"[LanStatus] 5353 绑定失败({ex.GetType().Name})，本次跳过局域网状态");
-            return result;
+            return new LanStatusResult(result, targets.Count, LanAttempt.SocketFailed,
+                targets.Values.Select(t => t.Name).ToList());
         }
 
         using (udp)
@@ -81,10 +105,19 @@ public class MdnsStatusClient
             }
         }
 
+        var unanswered = targets.Values
+            .Where(t => !result.ContainsKey(t.DeviceId.ToLowerInvariant()))
+            .Select(t => t.Name)
+            .ToList();
+
         SimpleLogger.Log($"[LanStatus] 局域网读到 {result.Count}/{targets.Count} 台：" +
             string.Join(", ", result.Values.Select(v => $"{(targets.TryGetValue(v.DeviceId.ToLowerInvariant(), out var t) ? t.Name : v.DeviceId)}" +
                 $"[{string.Join(",", v.Channels.OrderBy(c => c.Key).Select(c => c.Key + (c.Value ? "=on" : "=off")))}] seq={v.Seq}")));
-        return result;
+        if (unanswered.Count > 0)
+            SimpleLogger.Log($"[LanStatus] 问了没应答 {unanswered.Count} 台：{string.Join(", ", unanswered)}");
+
+        return new LanStatusResult(result, targets.Count,
+            result.Count > 0 ? LanAttempt.Read : LanAttempt.NoResponder, unanswered);
     }
 
     /// <summary>

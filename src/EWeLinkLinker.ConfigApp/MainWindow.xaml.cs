@@ -1686,10 +1686,12 @@ public partial class MainWindow : Window, IDisposable
             Title = "EWeLink Linker - 正在刷新状态...";
 
             // 局域网先问一次：设备此刻的通道状态在 mDNS 公告里，云端凭证死了也读得到
-            var lanStatus = new Dictionary<string, MdnsStatusClient.LanDeviceStatus>();
+            var lan = new MdnsStatusClient.LanStatusResult(
+                new Dictionary<string, MdnsStatusClient.LanDeviceStatus>(), 0,
+                MdnsStatusClient.LanAttempt.NoTargets, new List<string>());
             try
             {
-                lanStatus = await _lanStatusClient.QueryStatusAsync(_allDevices, TimeSpan.FromMilliseconds(2500));
+                lan = await _lanStatusClient.QueryStatusAsync(_allDevices, TimeSpan.FromMilliseconds(2500));
             }
             catch (Exception ex)
             {
@@ -1746,7 +1748,7 @@ public partial class MainWindow : Window, IDisposable
             var lanApplied = 0;
             foreach (var localDevice in _allDevices)
             {
-                if (!lanStatus.TryGetValue(localDevice.DeviceId.ToLowerInvariant(), out var live)) continue;
+                if (!lan.Devices.TryGetValue(localDevice.DeviceId.ToLowerInvariant(), out var live)) continue;
                 foreach (var (outlet, on) in live.Channels)
                 {
                     if (outlet < 0 || outlet >= localDevice.ChannelStates.Count) continue;
@@ -1756,24 +1758,23 @@ public partial class MainWindow : Window, IDisposable
                 Log($"[刷新状态] {localDevice.Name} 的通道状态取自局域网实时值 (seq={live.Seq}, {live.SourceIp})");
             }
 
+            var feedback = RefreshFeedback.Build(cloudDevices != null, cloudError, lan, lanApplied,
+                                                 _allDevices.Count, renewedByRelogin);
+
             if (cloudDevices == null && lanApplied == 0)
-                throw new Exception(cloudError ?? "云端与局域网都没有拿到状态");
+            {
+                // 两侧都没东西可显示：不重建卡片也不写盘，但要把"云端怎么了"和"局域网为什么没读到"一起说
+                Title = "EWeLink Linker";
+                MessageBox.Show(feedback, "刷新失败", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
 
             RebuildDeviceCards();
             // Bug 修复：刷新状态后保存配置，防止崩溃后丢失
             SaveConfig();
             Title = "EWeLink Linker";
 
-            string message;
-            if (cloudDevices == null)
-                message = $"云端这次没走通（{cloudError}），已用局域网实时值更新 {lanApplied} 台设备的通道状态。";
-            else if (lanApplied > 0)
-                message = $"状态刷新完成，其中 {lanApplied} 台的通道状态取自局域网实时值，其余来自云端" +
-                          (renewedByRelogin ? "（云端登录已自动续期，新 token 已写入配置）" : "") + "。";
-            else
-                message = renewedByRelogin ? "状态刷新完成（云端登录已自动续期，新 token 已写入配置）" : "状态刷新完成";
-
-            MessageBox.Show(message, cloudDevices == null ? "部分完成" : "刷新完成",
+            MessageBox.Show(feedback, cloudDevices == null ? "部分完成" : "刷新完成",
                 MessageBoxButton.OK, cloudDevices == null ? MessageBoxImage.Warning : MessageBoxImage.Information);
         }
         catch (Exception ex)
