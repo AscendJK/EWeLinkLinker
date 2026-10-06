@@ -1,4 +1,5 @@
 using System.ServiceProcess;
+using System.Text;
 using EWeLinkLinker.Core.Cloud;
 using EWeLinkLinker.Core.Config;
 using EWeLinkLinker.Core.Lan;
@@ -21,6 +22,7 @@ public class LinkerWindowsService : ServiceBase
     private TriggerManager? _triggerManager;
     private FileSystemWatcher? _configWatcher;
     private CancellationTokenSource? _wakeCts; // 修复：唤醒任务取消支持
+    private string? _triggerSignature;  // 当前已加载规则的签名，用于跳过无谓的触发器重建
 
     public LinkerWindowsService()
     {
@@ -126,6 +128,7 @@ public class LinkerWindowsService : ServiceBase
             }
 
             _triggerManager = new TriggerManager(service, _logPath, _logger);
+            _triggerSignature = BuildTriggerSignature(config);
 
             // 异步加载和启动（使用配置的轮询间隔）
             int pollingInterval = config.PollingIntervalSeconds;
@@ -179,6 +182,12 @@ public class LinkerWindowsService : ServiceBase
             var lastRead = DateTime.MinValue;
             void HandleConfigChange(object s, FileSystemEventArgs e)
             {
+                // FileSystemWatcher 的 Filter 是前缀匹配，原子写入用的 linker.json.tmp
+                // 之类也会进来；只有真正的配置文件名才需要重载
+                var configFileName = Path.GetFileName(_configPath);
+                if (!string.IsNullOrEmpty(e.Name) &&
+                    !e.Name.Equals(configFileName, StringComparison.OrdinalIgnoreCase)) return;
+
                 // 防抖：500ms 内只处理一次
                 lock (debounceLock)
                 {
@@ -249,10 +258,52 @@ public class LinkerWindowsService : ServiceBase
         // 服务端需要重新读取 Token 才能正常使用云端 API
         InitializeClients();
 
+        // 重建触发器会清空每个触发器的边沿记忆（_wasTriggered / _previousCompositeResult），
+        // 仍处「满足」状态的规则会在下一轮轮询被当成新跳变，重复下发一次设备命令。
+        // 所以只有真正影响规则评估的字段变了才重建。
+        var signature = BuildTriggerSignature(config);
+        if (_triggerSignature == signature)
+        {
+            Log("配置变更不涉及规则或轮询间隔，跳过触发器重建");
+            return;
+        }
+        _triggerSignature = signature;
+
         // 使用 TriggerManager.ReloadAsync 正确停止旧触发器并加载新触发器
         await _triggerManager.ReloadAsync(config.Rules, config.PollingIntervalSeconds);
 
         Log($"Config reloaded: {config.Rules.Count} rules, polling interval: {config.PollingIntervalSeconds}s");
+    }
+
+    /// <summary>
+    /// 只覆盖「会影响触发器评估」的字段：轮询间隔、启用的规则、每个条件的类型与参数、
+    /// 每个动作的目标通道与期望状态。设备 IP/名称、账户与 token 都不在内——
+    /// 那些在动作执行时由 LinkerService 从磁盘重读，不需要重建触发器。
+    /// </summary>
+    private static string BuildTriggerSignature(LinkerConfig config)
+    {
+        var sb = new StringBuilder();
+        sb.Append("P").Append(config.PollingIntervalSeconds);
+
+        foreach (var rule in config.Rules)
+        {
+            if (!rule.Enabled) continue;
+
+            sb.Append("|C[");
+            foreach (var c in rule.Conditions)
+            {
+                sb.Append(c.Type).Append(':').Append(c.Parameter).Append('/').Append(c.Parameter2)
+                  .Append(':').Append(c.Comparison).Append(':').Append(c.Operator).Append(',');
+            }
+            sb.Append("]A[");
+            foreach (var a in rule.Actions)
+            {
+                sb.Append(a.DeviceId).Append('#').Append(a.Outlet).Append('#').Append(a.State).Append(',');
+            }
+            sb.Append(']');
+        }
+
+        return sb.ToString();
     }
 
     /// <summary>
