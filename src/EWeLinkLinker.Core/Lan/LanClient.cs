@@ -529,6 +529,14 @@ public class LanClient
             var response = await _http.SendAsync(request);
             var json = await response.Content.ReadAsStringAsync();
 
+            // 设备会用"非 2xx + 空 body"表达拒绝。不判状态码就会把没做成的事记成成功，
+            // 既不重试，[AUDIT] 留痕也跟着骗人
+            if (!response.IsSuccessStatusCode)
+            {
+                SimpleLogger.Log($"[LAN] {device.Name} HTTP {(int)response.StatusCode} rejected: {(json.Length > 120 ? json[..120] : json)}");
+                return false;
+            }
+
             // H-? 修复：区分 HTTP 路径和 Socket 路径的空响应语义。
             // HttpClient 路径收到 HTTP 200（即使空 body）说明设备已接收请求，返回 true。
             // Socket 路径的空响应由 ReadHttpResponseAsync 返回 null 处理。
@@ -588,7 +596,8 @@ public class LanClient
                 if (bodyStart >= 0)
                 {
                     var jsonBody = fullResponse[(bodyStart + 4)..].Trim();
-                    if (string.IsNullOrEmpty(jsonBody)) return false;
+                    // 与 HTTP 路径一致：已确认是 200，老固件不返 body，命令其实执行了
+                    if (string.IsNullOrEmpty(jsonBody)) return true;
                     try
                     {
                         // 与 HTTP 路径一致，用 JSON 解析判断 error 字段
