@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using EWeLinkLinker.Core.Models;
 
@@ -178,21 +179,41 @@ public class LinkerConfig
     public string ToJson() => JsonSerializer.Serialize(this, JsonOptions);
 
     /// <summary>
-    /// 磁盘上现有内容与将要写入的一字不差时返回 true。读不动文件一律当作"有变化"，
-    /// 宁可多写一次，也不能把用户的保存变成静默失败。
+    /// 磁盘上现有内容与将要写入的在语义上一致时返回 true。
+    /// 不能逐字节比文本：DPAPI 每次加密都产生不同密文，同一份凭据重存一遍字符就变了，
+    /// 于是"没变就不写"永远命中不了，打开再关掉工具也要重写一次配置。
+    /// 比较前把密文换回明文。读不动文件一律当作"有变化"——宁可多写一次，
+    /// 也不能把用户按下的保存变成静默失败。
     /// </summary>
     public bool MatchesFile(string path)
     {
         try
         {
             if (!File.Exists(path)) return false;
-            var existing = File.ReadAllText(path).TrimStart((char)0xFEFF);
-            return string.Equals(existing.TrimEnd(), ToJson().TrimEnd(), StringComparison.Ordinal);
+            var onDisk = JsonSerializer.Deserialize<LinkerConfig>(File.ReadAllText(path), JsonOptions);
+            return onDisk is not null && JsonNode.DeepEquals(onDisk.ToComparableNode(), ToComparableNode());
         }
         catch
         {
             return false;
         }
+    }
+
+    private JsonNode ToComparableNode()
+    {
+        var root = JsonNode.Parse(ToJson())!.AsObject();
+
+        if (root["tokens"] is JsonObject tokens)
+        {
+            tokens["accessToken"] = JsonValue.Create(Tokens.AccessToken);
+            tokens["refreshToken"] = JsonValue.Create(Tokens.RefreshToken);
+            tokens["userApiKey"] = JsonValue.Create(Tokens.UserApiKey);
+        }
+
+        if (root["account"] is JsonObject account && account.ContainsKey("password"))
+            account["password"] = JsonValue.Create(Account.Password);
+
+        return root;
     }
 
     public bool Save(string path)
