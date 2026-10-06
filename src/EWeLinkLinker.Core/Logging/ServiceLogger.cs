@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text.RegularExpressions;
 using EWeLinkLinker.Core.Models;
 
 namespace EWeLinkLinker.Core.Logging;
@@ -11,12 +12,19 @@ public sealed class ServiceLogger : IDisposable
     private readonly string _logPath;
     private readonly BlockingCollection<string> _logQueue = new(new ConcurrentQueue<string>(), boundedCapacity: 1000);
     private readonly Thread _writerThread;
+    private readonly Func<DateTime> _now;
     private volatile bool _enabled;
     private volatile bool _disposed;
 
-    public ServiceLogger(string logPath, bool enabled = true)
+    public ServiceLogger(string logPath, bool enabled = true) : this(logPath, enabled, static () => DateTime.Now)
+    {
+    }
+
+    /// <summary>跨天滚动只能靠"下一次写日志时才发现日期变了"，测试需要一个可控的时钟。</summary>
+    internal ServiceLogger(string logPath, bool enabled, Func<DateTime> now)
     {
         _logPath = logPath;
+        _now = now;
         _enabled = enabled;
         var logDir = Path.GetDirectoryName(logPath);
         if (!string.IsNullOrEmpty(logDir))
@@ -65,15 +73,26 @@ public sealed class ServiceLogger : IDisposable
     /// </summary>
     private void ProcessLogQueue()
     {
+        StreamWriter? writer = null;
+        var currentDate = _now().Date;
         try
         {
-            using var stream = new FileStream(_logPath, FileMode.Append, FileAccess.Write, FileShare.Read | FileShare.Delete,
-                bufferSize: 4096);
-            using var writer = new StreamWriter(stream) { AutoFlush = true };
-
             // 阻塞等待日志，直到队列完成
             foreach (var entry in _logQueue.GetConsumingEnumerable())
             {
+                var today = _now().Date;
+                if (writer == null)
+                {
+                    currentDate = today;
+                    writer = OpenWriterForDate(today);
+                }
+                else if (today != currentDate)
+                {
+                    writer.Dispose();
+                    currentDate = today;
+                    writer = OpenWriterForDate(today);
+                    CleanupOldLogs(Path.GetDirectoryName(_logPath));
+                }
                 writer.WriteLine(entry);
             }
         }
@@ -81,6 +100,27 @@ public sealed class ServiceLogger : IDisposable
         {
             System.Diagnostics.Debug.WriteLine($"[ServiceLogger] 写入异常: {ex}");
         }
+        finally
+        {
+            try { writer?.Dispose(); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// 服务可能连续跑几十天，而文件名里的日期原本只在启动那一刻算一次 ⇒ 全部追加进同一个文件且永不清理。
+    /// 文件名不含日期时（调用方自己起名）就沿用原路径，不做任何猜测。
+    /// </summary>
+    private StreamWriter OpenWriterForDate(DateTime date)
+    {
+        var path = _logPath;
+        var name = Path.GetFileName(_logPath);
+        if (Regex.IsMatch(name, @"\d{4}-\d{2}-\d{2}"))
+        {
+            path = Path.Combine(Path.GetDirectoryName(_logPath) ?? ".",
+                Regex.Replace(name, @"\d{4}-\d{2}-\d{2}", date.ToString("yyyy-MM-dd")));
+        }
+        return new StreamWriter(new FileStream(path, FileMode.Append, FileAccess.Write,
+            FileShare.Read | FileShare.Delete, bufferSize: 4096)) { AutoFlush = true };
     }
 
     public bool Enabled
