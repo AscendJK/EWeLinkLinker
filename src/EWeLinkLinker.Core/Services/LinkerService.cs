@@ -72,8 +72,10 @@ public class LinkerService
         {
             try
             {
-                var tokens = await _tokenManager.GetValidTokensAsync();
-                Log("Token validated successfully");
+                await _tokenManager.GetValidTokensAsync();
+                // 这句原来叫 "Token validated successfully"，可它现在只在到了刷新期限时才联网，
+                // 平时只是把盘上那份读出来——日志里别留一条自己做不到的承诺
+                Log("Token check done (未到期则不联网，未向云端验证)");
             }
             catch (Exception ex)
             {
