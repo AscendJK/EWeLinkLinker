@@ -324,4 +324,12 @@ public class TokenConfig
         get => _userApiKey;
         set => _userApiKey = value;
     }
+
+    /// <summary>
+    /// 拿到当前这对 at/rt 的时刻（UTC）。官方接口不返回到期时间，只写明寿命
+    /// （access token 30 天、refresh token 60 天），所以只能自己记。
+    /// null＝老配置没这个值：不主动刷新，真失效交给云端返回码兜。
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public DateTime? TokenObtainedAtUtc { get; set; }
 }
