@@ -113,11 +113,8 @@ public class CloudClient
 
         using var doc = JsonDocument.Parse(json);
 
-        if (doc.RootElement.TryGetProperty("error", out var error) && error.GetInt32() != 0)
-        {
-            var errorMsg = doc.RootElement.TryGetProperty("msg", out var msg) ? msg.GetString() : "Unknown";
-            throw new Exception($"Token refresh failed: {errorMsg} (error={error.GetInt32()})");
-        }
+        // 401/402 在这里意味着 refresh token 也一起废了，只有重新登录能救
+        ThrowIfCloudError(doc.RootElement, (int)response.StatusCode, "RefreshToken", 401, 402, 405);
 
         if (!doc.RootElement.TryGetProperty("data", out var dataElement))
         {
@@ -186,7 +183,7 @@ public class CloudClient
             var errorBody = await response.Content.ReadAsStringAsync();
             // body 只进日志不进异常消息：异常消息会原样弹到界面上
             SimpleLogger.Log($"[Cloud] GetDevices failed: HTTP {status}, {Truncate(errorBody, 200)}");
-            throw new CloudApiException($"云端返回 HTTP {status}", status, null, null, status is 401 or 403);
+            throw new CloudApiException($"云端返回 HTTP {status}", status, null, null, status is 401 or 402);
         }
 
         var json = await response.Content.ReadAsStringAsync();
@@ -196,7 +193,7 @@ public class CloudClient
         // 云端把业务错误装在 HTTP 200 里回。实测凭证失效时是
         // {"error":401,"msg":"cannot found access token info","data":{}} —— data 在但没有 thingList。
         // 不先看 error，"登录过期"就会被报成"返回结构异常"，谁也看不出该重新登录。
-        ThrowIfCloudError(doc.RootElement, status);
+        ThrowIfCloudError(doc.RootElement, status, "GetDevices", 401, 402);
 
         if (!doc.RootElement.TryGetProperty("data", out var data) ||
             !data.TryGetProperty("thingList", out var thingList) ||
@@ -277,9 +274,11 @@ public class CloudClient
 
     /// <summary>
     /// 顶层 error 非 0 就是云端明确报了错，只是它披着 HTTP 200。
-    /// 401/403 或 msg 提到 access token 的，归成"凭证失效"——界面据此才能说"该重新登录"而不是"结构异常"。
+    /// 哪些码算"凭证失效"按调用点给：设备列表看 401（被别处登录顶号）/402（过期），
+    /// 而 403 是 url 写错、跟凭证无关。刷新接口只接受 rt 一个入参，所以它返回 405
+    /// （实测 msg="can't find the account with this rt!"）只能是在说 rt 找不到，等同于要重新登录。
     /// </summary>
-    private static void ThrowIfCloudError(JsonElement root, int status)
+    private static void ThrowIfCloudError(JsonElement root, int status, string what, params int[] authCodes)
     {
         // TryGetInt32 只对 Number 生效，遇到 "error":"401" 这种字符串会直接抛 InvalidOperationException
         if (!root.TryGetProperty("error", out var errorEl) ||
@@ -290,11 +289,11 @@ public class CloudClient
         var cloudMsg = root.TryGetProperty("msg", out var msgEl) && msgEl.ValueKind == JsonValueKind.String
             ? msgEl.GetString()
             : null;
-        var isAuthFailure = code is 401 or 403 ||
+        var isAuthFailure = authCodes.Contains(code) ||
             cloudMsg?.Contains("access token", StringComparison.OrdinalIgnoreCase) == true ||
             cloudMsg?.Contains("unauthorized", StringComparison.OrdinalIgnoreCase) == true;
 
-        SimpleLogger.Log($"[Cloud] GetDevices: HTTP {status}, error={code}, msg={cloudMsg}");
+        SimpleLogger.Log($"[Cloud] {what}: HTTP {status}, error={code}, msg={cloudMsg}");
         throw new CloudApiException(
             isAuthFailure ? "云端登录已过期或凭证无效" : $"云端返回错误 {code}：{cloudMsg ?? "无说明"}",
             status, code, cloudMsg, isAuthFailure);
