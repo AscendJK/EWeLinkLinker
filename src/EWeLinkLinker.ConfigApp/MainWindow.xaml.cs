@@ -35,6 +35,8 @@ public partial class MainWindow : Window, IDisposable
     private bool _isLoggingIn;
     private bool _isRefreshing;
     private bool _hasAutoDiscovered;
+    private DateTime _lastAutoReloginUtc = DateTime.MinValue;
+    private static readonly TimeSpan AutoReloginCooldown = TimeSpan.FromMinutes(1);
     private readonly DispatcherTimer _serviceStatusTimer;
 
     /// <summary>
@@ -1663,13 +1665,35 @@ public partial class MainWindow : Window, IDisposable
 
     private async void RefreshState_Click(object sender, RoutedEventArgs e)
     {
-        if (_isRefreshing || _allDevices.Count == 0 || string.IsNullOrEmpty(_accessToken)) return;
+        if (_isRefreshing || _allDevices.Count == 0) return;
         _isRefreshing = true;
+        var renewedByRelogin = false;
 
         try
         {
             Title = "EWeLink Linker - 正在刷新状态...";
-            var cloudDevices = await _cloudClient.GetDevicesAsync(_accessToken);
+
+            List<DeviceInfo> cloudDevices;
+            var token = SyncAccessTokenFromDisk();
+            if (string.IsNullOrEmpty(token))
+            {
+                Log("[刷新状态] 没有可用的访问令牌，直接尝试登录一次");
+                cloudDevices = await ReloginAndFetchDevicesAsync();
+                renewedByRelogin = true;
+            }
+            else
+            {
+                try
+                {
+                    cloudDevices = await _cloudClient.GetDevicesAsync(token);
+                }
+                catch (CloudApiException ex) when (ex.IsAuthFailure)
+                {
+                    Log($"[刷新状态] 凭证失效（error={ex.ErrorCode} {ex.CloudMessage}），自动重新登录一次");
+                    cloudDevices = await ReloginAndFetchDevicesAsync();
+                    renewedByRelogin = true;
+                }
+            }
 
             foreach (var localDevice in _allDevices)
             {
@@ -1686,7 +1710,8 @@ public partial class MainWindow : Window, IDisposable
             // Bug 修复：刷新状态后保存配置，防止崩溃后丢失
             SaveConfig();
             Title = "EWeLink Linker";
-            MessageBox.Show("状态刷新完成", "刷新完成", MessageBoxButton.OK, MessageBoxImage.Information);
+            MessageBox.Show(renewedByRelogin ? "状态刷新完成（云端登录已自动续期，新 token 已写入配置）" : "状态刷新完成",
+                "刷新完成", MessageBoxButton.OK, MessageBoxImage.Information);
         }
         catch (Exception ex)
         {
@@ -1697,6 +1722,58 @@ public partial class MainWindow : Window, IDisposable
         {
             _isRefreshing = false;
         }
+    }
+
+    /// <summary>
+    /// 盘上那份 token 可能已被服务端的 TokenManager 换掉，而界面里是启动时读的快照。
+    /// 不重读盘，"刷新状态"就会一直抱着死 token 失败到你手动登录为止。
+    /// </summary>
+    private string SyncAccessTokenFromDisk()
+    {
+        try
+        {
+            var disk = LinkerConfig.Load(_configPath).Tokens;
+            if (!string.IsNullOrEmpty(disk.AccessToken) && disk.AccessToken != _accessToken)
+            {
+                Log("[刷新状态] 采用磁盘上更新的 token（服务端刷新过）");
+                _accessToken = disk.AccessToken;
+                _refreshToken = disk.RefreshToken;
+                _userApiKey = disk.UserApiKey;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"[刷新状态] 读取磁盘 token 失败，沿用内存值: {ex.Message}");
+        }
+
+        return _accessToken;
+    }
+
+    /// <summary>
+    /// 用界面上的账号密码静默重登一次并取设备列表。只给一次机会，且一分钟内不重复——
+    /// 密码若在别处改过，反复打登录接口只会把账号打进锁定。
+    /// </summary>
+    private async Task<List<DeviceInfo>> ReloginAndFetchDevicesAsync()
+    {
+        if (DateTime.UtcNow - _lastAutoReloginUtc < AutoReloginCooldown)
+            throw new Exception("云端登录已过期，自动重登刚试过不到一分钟。请确认账号密码后点「登录获取设备」。");
+        _lastAutoReloginUtc = DateTime.UtcNow;
+
+        var account = AccountTextBox.Text;
+        var password = PasswordBox.Password;
+        if (string.IsNullOrEmpty(account) || string.IsNullOrEmpty(password))
+            throw new Exception("云端登录已过期，且界面上没有可用的账号密码。请填写后点「登录获取设备」。");
+
+        var region = RegionComboBox.Text;
+        _cloudClient.Region = region;
+        var (tokens, _) = await _cloudClient.LoginAsync(account, password, GetCountryCodeForRegion(region));
+        _accessToken = tokens.AccessToken;
+        _refreshToken = tokens.RefreshToken;
+        _userApiKey = tokens.UserApiKey;
+        SaveTokensOnly();
+        Log("[刷新状态] 自动重新登录成功，新 token 已写入配置");
+
+        return await _cloudClient.GetDevicesAsync(_accessToken);
     }
 
     private async Task AutoDiscoverIPsOnStartup()
