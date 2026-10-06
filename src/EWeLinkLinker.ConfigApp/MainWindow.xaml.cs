@@ -21,6 +21,7 @@ public partial class MainWindow : Window, IDisposable
 {
     private readonly CloudClient _cloudClient;
     private readonly LanClient _lanClient;
+    private readonly MdnsStatusClient _lanStatusClient = new();
     private readonly HttpClient _cloudHttpClient;
     private readonly HttpClient _lanHttpClient;
     private readonly string _configPath;
@@ -1684,45 +1685,96 @@ public partial class MainWindow : Window, IDisposable
         {
             Title = "EWeLink Linker - 正在刷新状态...";
 
-            List<DeviceInfo> cloudDevices;
-            var token = SyncAccessTokenFromDisk();
-            if (string.IsNullOrEmpty(token))
+            // 局域网先问一次：设备此刻的通道状态在 mDNS 公告里，云端凭证死了也读得到
+            var lanStatus = new Dictionary<string, MdnsStatusClient.LanDeviceStatus>();
+            try
             {
-                Log("[刷新状态] 没有可用的访问令牌，直接走自愈阶梯");
-                cloudDevices = await RecoverFromAuthFailureAsync();
-                renewedByRelogin = true;
+                lanStatus = await _lanStatusClient.QueryStatusAsync(_allDevices, TimeSpan.FromMilliseconds(2500));
             }
-            else
+            catch (Exception ex)
             {
-                try
+                Log($"[刷新状态] 局域网状态读取异常，本次只用云端: {ex.Message}");
+            }
+
+            List<DeviceInfo>? cloudDevices = null;
+            string? cloudError = null;
+            try
+            {
+                var token = SyncAccessTokenFromDisk();
+                if (string.IsNullOrEmpty(token))
                 {
-                    cloudDevices = await _cloudClient.GetDevicesAsync(token);
-                }
-                catch (CloudApiException ex) when (ex.IsAuthFailure)
-                {
-                    Log($"[刷新状态] 凭证失效（error={ex.ErrorCode} {ex.CloudMessage}），走自愈阶梯");
+                    Log("[刷新状态] 没有可用的访问令牌，直接走自愈阶梯");
                     cloudDevices = await RecoverFromAuthFailureAsync();
                     renewedByRelogin = true;
                 }
-            }
-
-            foreach (var localDevice in _allDevices)
-            {
-                var cloudDevice = cloudDevices.FirstOrDefault(d => d.DeviceId == localDevice.DeviceId);
-                if (cloudDevice != null)
+                else
                 {
-                    localDevice.ChannelCount = cloudDevice.ChannelCount;
-                    localDevice.ChannelStates = new List<string>(cloudDevice.ChannelStates);
-                    localDevice.IsOnline = cloudDevice.IsOnline;
+                    try
+                    {
+                        cloudDevices = await _cloudClient.GetDevicesAsync(token);
+                    }
+                    catch (CloudApiException ex) when (ex.IsAuthFailure)
+                    {
+                        Log($"[刷新状态] 凭证失效（error={ex.ErrorCode} {ex.CloudMessage}），走自愈阶梯");
+                        cloudDevices = await RecoverFromAuthFailureAsync();
+                        renewedByRelogin = true;
+                    }
                 }
             }
+            catch (Exception ex)
+            {
+                // 云端失败不再等于整次刷新失败：局域网那份照样能显示，剩下 3 台只能等云端
+                cloudError = ex.Message;
+                Log($"[刷新状态] 云端未完成: {ex.Message}");
+            }
+
+            if (cloudDevices != null)
+            {
+                foreach (var localDevice in _allDevices)
+                {
+                    var cloudDevice = cloudDevices.FirstOrDefault(d => d.DeviceId == localDevice.DeviceId);
+                    if (cloudDevice != null)
+                    {
+                        localDevice.ChannelCount = cloudDevice.ChannelCount;
+                        localDevice.ChannelStates = new List<string>(cloudDevice.ChannelStates);
+                        localDevice.IsOnline = cloudDevice.IsOnline;
+                    }
+                }
+            }
+
+            // 局域网那份覆盖云端：云端是服务器上的缓存，局域网是设备自己报的此刻状态
+            var lanApplied = 0;
+            foreach (var localDevice in _allDevices)
+            {
+                if (!lanStatus.TryGetValue(localDevice.DeviceId.ToLowerInvariant(), out var live)) continue;
+                foreach (var (outlet, on) in live.Channels)
+                {
+                    if (outlet < 0 || outlet >= localDevice.ChannelStates.Count) continue;
+                    localDevice.ChannelStates[outlet] = on ? "on" : "off";
+                }
+                lanApplied++;
+                Log($"[刷新状态] {localDevice.Name} 的通道状态取自局域网实时值 (seq={live.Seq}, {live.SourceIp})");
+            }
+
+            if (cloudDevices == null && lanApplied == 0)
+                throw new Exception(cloudError ?? "云端与局域网都没有拿到状态");
 
             RebuildDeviceCards();
             // Bug 修复：刷新状态后保存配置，防止崩溃后丢失
             SaveConfig();
             Title = "EWeLink Linker";
-            MessageBox.Show(renewedByRelogin ? "状态刷新完成（云端登录已自动续期，新 token 已写入配置）" : "状态刷新完成",
-                "刷新完成", MessageBoxButton.OK, MessageBoxImage.Information);
+
+            string message;
+            if (cloudDevices == null)
+                message = $"云端这次没走通（{cloudError}），已用局域网实时值更新 {lanApplied} 台设备的通道状态。";
+            else if (lanApplied > 0)
+                message = $"状态刷新完成，其中 {lanApplied} 台的通道状态取自局域网实时值，其余来自云端" +
+                          (renewedByRelogin ? "（云端登录已自动续期，新 token 已写入配置）" : "") + "。";
+            else
+                message = renewedByRelogin ? "状态刷新完成（云端登录已自动续期，新 token 已写入配置）" : "状态刷新完成";
+
+            MessageBox.Show(message, cloudDevices == null ? "部分完成" : "刷新完成",
+                MessageBoxButton.OK, cloudDevices == null ? MessageBoxImage.Warning : MessageBoxImage.Information);
         }
         catch (Exception ex)
         {
