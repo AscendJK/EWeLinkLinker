@@ -135,6 +135,10 @@ public class CpuUsageTrigger : OptimizedTriggerBase
                     _sharedCounter = new PerformanceCounter("Processor", "% Processor Time", "_Total");
                     _sharedCounter.NextValue();  // 首次调用返回 0，需要预热
                     _counterInitialized = true;
+                    // 预热后紧接着再取一次，采样窗口≈0，拿到的不是使用率而是垃圾值
+                    // （空闲机器上实测打出过 56.8 / 78.4 / 100.0，真实值约 15）。
+                    // 这一轮按"读不到"处理：NaN 走安全失败，不判定也不改状态，下一轮（3 秒后）就是有效值。
+                    return float.NaN;
                 }
                 return _sharedCounter?.NextValue() ?? float.NaN;
             }
