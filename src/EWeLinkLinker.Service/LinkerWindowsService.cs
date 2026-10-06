@@ -62,6 +62,11 @@ public class LinkerWindowsService : ServiceBase
 
     protected override void OnStart(string[] args)
     {
+        // 启动阶段先开日志：_logger.Enabled 原本要等配置读完才置位，
+        // 若配置正好损坏，损坏原因就会被写入开关吞掉
+        LoggerConfig.IsEnabled = true;
+        _logger.Enabled = true;
+
         // 调试输出：确认服务启动（写入控制台和调试输出）
         Console.WriteLine($"[DEBUG] EWeLink Linker Service starting...");
         System.Diagnostics.Debug.WriteLine($"[DEBUG] EWeLink Linker Service starting...");
@@ -77,9 +82,10 @@ public class LinkerWindowsService : ServiceBase
         InitializeClients();
 
         // 根据配置启用/禁用日志（同步到全局开关）
-        var config = Core.Config.LinkerConfig.Load(_configPath);
-        LoggerConfig.IsEnabled = config.LoggingEnabled;
-        _logger.Enabled = config.LoggingEnabled;
+        // 配置不可读时保持日志开启，否则启动失败的原因无处可查
+        var config = TryLoadConfig();
+        LoggerConfig.IsEnabled = config?.LoggingEnabled ?? true;
+        _logger.Enabled = config?.LoggingEnabled ?? true;
         Log($"Logging enabled: {_logger.Enabled}");
 
         // 加载并启动扩展触发器（时间、温度、应用等）
@@ -106,7 +112,12 @@ public class LinkerWindowsService : ServiceBase
     {
         try
         {
-            var config = LinkerConfig.Load(_configPath);
+            var config = TryLoadConfig();
+            if (config == null)
+            {
+                Log("Triggers not started: config unreadable, will retry on next config change");
+                return;
+            }
             var service = CreateLinkerService();
             if (service == null)
             {
@@ -137,9 +148,11 @@ public class LinkerWindowsService : ServiceBase
         {
             Log($"Failed to load triggers: {ex.Message}");
         }
-
-        // 启动配置文件监控
-        StartConfigWatcher();
+        finally
+        {
+            // 必须放 finally：早退（return）时也要挂上监视器，用户修好配置后才能自动重载
+            StartConfigWatcher();
+        }
     }
 
     /// <summary>
@@ -147,6 +160,8 @@ public class LinkerWindowsService : ServiceBase
     /// </summary>
     private void StartConfigWatcher()
     {
+        if (_configWatcher != null) return;  // 可由重载路径二次进入，避免重复挂监视器
+
         try
         {
             var configDir = Path.GetDirectoryName(_configPath);
@@ -207,10 +222,21 @@ public class LinkerWindowsService : ServiceBase
     /// </summary>
     private async Task ReloadConfigAsync()
     {
-        if (_triggerManager == null) return;
+        // 坏配置不重载，保留当前正在运行的触发器
+        var config = TryLoadConfig();
+        if (config == null)
+        {
+            Log("Reload skipped: config unreadable, keeping current triggers");
+            return;
+        }
 
-        // 重新加载配置
-        var config = LinkerConfig.Load(_configPath);
+        // 触发器还没起来（启动时配置损坏，或启动时还没登录）：此刻配置可用，补一次初始化
+        if (_triggerManager == null)
+        {
+            Log("Triggers not running, initializing from reloaded config");
+            LoadAndStartTriggers();
+            return;
+        }
 
         // 更新日志开关（同步到全局开关和本地开关）
         LoggerConfig.IsEnabled = config.LoggingEnabled;
@@ -432,7 +458,13 @@ public class LinkerWindowsService : ServiceBase
     /// </summary>
     private void InitializeClients()
     {
-        var config = LinkerConfig.Load(_configPath);
+        var config = TryLoadConfig();
+        if (config == null)
+        {
+            // 配置不可读：保留现有客户端——一次坏写入不该毁掉可用的 token 客户端
+            if (_cloudClient != null) return;
+            config = new LinkerConfig();
+        }
         _cloudClient = new CloudClient(_sharedHttpClient)
         {
             Region = config.Account.Region
@@ -440,6 +472,23 @@ public class LinkerWindowsService : ServiceBase
         // H-? 修复：先 Dispose 旧的 _tokenManager，释放 SemaphoreSlim，防止泄漏
         (_tokenManager as IDisposable)?.Dispose();
         _tokenManager = new TokenManager(_cloudClient, _configPath);
+    }
+
+    /// <summary>
+    /// 读取共享配置文件。解析失败时记录错误并返回 null，
+    /// 不让异常冒到 OnStart（否则 SCM 会直接判定服务启动失败）。
+    /// </summary>
+    private LinkerConfig? TryLoadConfig()
+    {
+        try
+        {
+            return LinkerConfig.Load(_configPath);
+        }
+        catch (Exception ex)
+        {
+            Log($"ERROR: 配置文件无法解析: {ex.Message} ({_configPath})");
+            return null;
+        }
     }
 
     public void StartAsConsole(string[] args)
