@@ -13,9 +13,11 @@ public class CpuTempTrigger : OptimizedTriggerBase
 {
     private readonly string _parameter;
     private readonly string _parameter2;
+    private readonly string _releaseBand;
     private readonly string _releaseParameter;
     private readonly ComparisonOperator _comparison;
     private bool _wasTriggered;
+    private DateTime? _latchedSinceUtc;
     private int _pollCount;
 
     public override string Type => "cpu_temp";
@@ -27,14 +29,16 @@ public class CpuTempTrigger : OptimizedTriggerBase
     {
         _parameter = config.Parameter;
         _parameter2 = config.Parameter2;
-        _releaseParameter = config.ReleaseParameter;
+        _releaseBand = config.ReleaseBand;
         _comparison = config.Comparison;
 
         if (!float.TryParse(config.Parameter, out _))
             throw new ArgumentException("温度阈值必须为数字");
 
-        if (!ComparisonHelper.ValidateRelease(config.Parameter, _releaseParameter, _comparison, out var releaseError))
+        if (!ComparisonHelper.ValidateRelease(config.Parameter, _releaseBand, _comparison, out var releaseError))
             throw new ArgumentException(releaseError);
+
+        _releaseParameter = ComparisonHelper.ResolveRelease(config.Parameter, _releaseBand, _comparison);
     }
 
     public override bool ValidateParameter(string parameter, out string? errorMessage)
@@ -70,6 +74,18 @@ public class CpuTempTrigger : OptimizedTriggerBase
             return ValueTask.FromResult(false);
         }
 
+        var nowUtc = DateTime.UtcNow;
+
+        // 锁存超时：强制松开，让本轮重新判定。读数仍然满足时也会重发一次动作，
+        // 用来纠正"规则以为已经处理过、设备其实被人手动改过"。只在启用滞回时生效。
+        if (_wasTriggered && !string.IsNullOrEmpty(_releaseParameter)
+            && ComparisonHelper.IsHoldExpired(_latchedSinceUtc, nowUtc))
+        {
+            _wasTriggered = false;
+            _latchedSinceUtc = null;
+            State = TriggerState.Monitoring;
+        }
+
         // 滞回：已锁存时，只有越过解除线才算不再满足
         var isTriggered = ComparisonHelper.Evaluate(temp, _parameter, _parameter2, _comparison)
                           || (_wasTriggered && !ComparisonHelper.IsReleased(temp, _releaseParameter, _comparison));
@@ -89,6 +105,7 @@ public class CpuTempTrigger : OptimizedTriggerBase
         if (isTriggered && !_wasTriggered)
         {
             _wasTriggered = true;
+            _latchedSinceUtc = DateTime.UtcNow;
             return ValueTask.FromResult(true);
         }
 
@@ -96,6 +113,7 @@ public class CpuTempTrigger : OptimizedTriggerBase
         if (!isTriggered && _wasTriggered)
         {
             _wasTriggered = false;
+            _latchedSinceUtc = null;
             State = TriggerState.Monitoring;
         }
 

@@ -95,47 +95,68 @@ public static class ComparisonHelper
     }
 
     /// <summary>
-    /// 校验解除线是否在触发线的另一侧。填反了会导致条件一旦满足就永不重新武装，
-    /// 所以要么保存时报错，要么触发器构造时拒绝加载。空解除线 = 不启用滞回，直接通过。
+    /// 锁存最长可保持多久，到期强制松开重新判定（纠正"规则以为已经处理过、
+    /// 但设备实际被人手动改过"的状态）。默认 30 分钟；测试可缩短。
     /// </summary>
-    public static bool ValidateRelease(string triggerParameter, string? releaseParameter,
+    public static TimeSpan MaxReleaseHold { get; set; } = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// 锁存是否已经超时。未记录起始时间（即没有滞回）时永不超时，维持旧行为。
+    /// </summary>
+    public static bool IsHoldExpired(DateTime? latchedSinceUtc, DateTime nowUtc) =>
+        latchedSinceUtc.HasValue && nowUtc - latchedSinceUtc.Value >= MaxReleaseHold;
+
+    /// <summary>
+    /// 配置里存的是"带宽"（意图：允许抖动多少），解除线是它派生出来的数。
+    /// 方向由比较符决定：≥ / &gt; 往低走才算松开，≤ / &lt; 往高走才算松开。
+    /// 这样以后改阈值，回差跟着阈值走，不会悄悄变成另一个值。
+    /// </summary>
+    public static string ResolveRelease(string triggerParameter, string? releaseBand, ComparisonOperator comparison)
+    {
+        if (string.IsNullOrWhiteSpace(releaseBand)) return "";
+        if (!float.TryParse(triggerParameter, out var trigger)) return "";
+        if (!float.TryParse(releaseBand, out var band) || band <= 0) return "";
+
+        return comparison switch
+        {
+            ComparisonOperator.Gte or ComparisonOperator.Gt =>
+                (trigger - band).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture),
+            ComparisonOperator.Lte or ComparisonOperator.Lt =>
+                (trigger + band).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture),
+            _ => ""
+        };
+    }
+
+    /// <summary>
+    /// 校验解除带宽。带宽为空 = 不启用滞回，直接通过；方向不再可能填反（由比较符推导），
+    /// 所以这里只查"是不是正数"和"这个比较符支不支持滞回"。
+    /// </summary>
+    public static bool ValidateRelease(string triggerParameter, string? releaseBand,
                                        ComparisonOperator comparison, out string? errorMessage)
     {
         errorMessage = null;
-        if (string.IsNullOrWhiteSpace(releaseParameter)) return true;
+        if (string.IsNullOrWhiteSpace(releaseBand)) return true;
 
-        if (!float.TryParse(triggerParameter, out var trigger))
+        if (!float.TryParse(triggerParameter, out _))
         {
-            errorMessage = "触发阈值不是数字，无法校验解除线";
+            errorMessage = "触发阈值不是数字，无法计算解除线";
             return false;
         }
-        if (!float.TryParse(releaseParameter, out var release))
+        if (!float.TryParse(releaseBand, out var band))
         {
-            errorMessage = "解除线必须是数字";
+            errorMessage = $"解除带宽必须是数字（当前填的是 {releaseBand}）";
             return false;
         }
-
-        switch (comparison)
+        if (band <= 0)
         {
-            case ComparisonOperator.Gte:
-            case ComparisonOperator.Gt:
-                if (release >= trigger)
-                {
-                    errorMessage = $"解除线必须小于触发阈值 {trigger:0.##}（当前填的是 {release:0.##}），否则条件一旦满足就再也无法重新触发";
-                    return false;
-                }
-                break;
-            case ComparisonOperator.Lte:
-            case ComparisonOperator.Lt:
-                if (release <= trigger)
-                {
-                    errorMessage = $"解除线必须大于触发阈值 {trigger:0.##}（当前填的是 {release:0.##}），否则条件一旦满足就再也无法重新触发";
-                    return false;
-                }
-                break;
-            default:
-                errorMessage = "解除线只支持 ≥ > ≤ < 这几种比较方式";
-                return false;
+            errorMessage = "解除带宽必须大于 0";
+            return false;
+        }
+        if (comparison is not (ComparisonOperator.Gte or ComparisonOperator.Gt
+                                   or ComparisonOperator.Lte or ComparisonOperator.Lt))
+        {
+            errorMessage = "解除带宽只支持 ≥ > ≤ < 这几种比较方式";
+            return false;
         }
 
         return true;

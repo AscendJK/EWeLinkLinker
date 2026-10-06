@@ -378,15 +378,24 @@
                                                                                      Style="{StaticResource ModernTextBox}"
                                                                                      Text="{Binding Parameter, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
                                                                                      Visibility="{Binding IsRangeComparison, Converter={StaticResource InverseBoolToVis}}"/>
-                                                                            <!-- 滞回解除线：仅数值条件 + 单向比较可用，留空=不启用 -->
-                                                                            <TextBlock Text="解除" FontSize="10" Foreground="Gray"
+                                                                            <!-- 滞回带宽：配置里存意图值，解除线由比较符方向派生；清空=不启用 -->
+                                                                            <TextBlock Text="抖动±" FontSize="10" Foreground="Gray"
                                                                                        VerticalAlignment="Center" Margin="6,0,2,0"
                                                                                        Visibility="{Binding ShowRelease, Converter={StaticResource BoolToVis}}"/>
-                                                                            <TextBox FontSize="11" TextAlignment="Center" VerticalContentAlignment="Center" Width="45"
-                                                                                     Style="{StaticResource ModernTextBox}"
-                                                                                     ToolTip="滞回解除线：条件满足后要越过此值才重新武装，用于抑制阈值附近的读数抖动。留空表示不启用。"
-                                                                                     Text="{Binding ReleaseParameter, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
-                                                                                     Visibility="{Binding ShowRelease, Converter={StaticResource BoolToVis}}"/>
+                                                                            <ComboBox IsEditable="True" DisplayMemberPath="Content" Width="46"
+                                                                                      FontSize="11" VerticalContentAlignment="Center"
+                                                                                      ToolTip="滞回带宽：允许阈值附近抖动多少而不重新武装。方向由比较符自动判定（≥ 往低、≤ 往高）。清空表示不启用。"
+                                                                                      Text="{Binding ReleaseBand, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
+                                                                                      Visibility="{Binding ShowRelease, Converter={StaticResource BoolToVis}}">
+                                                                                <ComboBoxItem Content="2"/>
+                                                                                <ComboBoxItem Content="3"/>
+                                                                                <ComboBoxItem Content="5"/>
+                                                                                <ComboBoxItem Content="8"/>
+                                                                                <ComboBoxItem Content="10"/>
+                                                                            </ComboBox>
+                                                                            <TextBlock Text="{Binding ReleaseHint}" FontSize="10" Foreground="Gray"
+                                                                                       VerticalAlignment="Center" Margin="4,0,0,0"
+                                                                                       Visibility="{Binding ShowRelease, Converter={StaticResource BoolToVis}}"/>
                                                                             <!-- 范围输入（双值） -->
                                                                             <StackPanel Orientation="Horizontal" VerticalAlignment="Center"
                                                                                         Visibility="{Binding IsRangeComparison, Converter={StaticResource BoolToVis}}">

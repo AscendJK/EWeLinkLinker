@@ -293,7 +293,7 @@ public class LinkerWindowsService : ServiceBase
             foreach (var c in rule.Conditions)
             {
                 sb.Append(c.Type).Append(':').Append(c.Parameter).Append('/').Append(c.Parameter2)
-                  .Append("/R").Append(c.ReleaseParameter)
+                  .Append("/R").Append(c.ReleaseBand)
                   .Append(':').Append(c.Comparison).Append(':').Append(c.Operator).Append(',');
             }
             sb.Append("]A[");

@@ -240,22 +240,22 @@ public partial class MainWindow : Window, IDisposable
         {
             var rulesList = _rules.ToList();
 
-            // 保存前校验解除线：方向填反了会让条件一旦满足就永不重新武装，
-            // 且服务端构造触发器时会抛异常、这条规则静默失效，所以必须拦在写入之前。
+            // 保存前校验解除带宽：填了非数字/零/负数，或这个比较符根本不支持滞回，都会让
+            // 派生出的解除线没意义；服务端构造触发器时会抛异常、这条规则静默失效，所以拦在写入之前。
             foreach (var rule in rulesList)
             {
                 foreach (var cond in rule.Conditions)
                 {
                     if (!cond.ShowRelease)
                     {
-                        cond.ReleaseParameter = ""; // 输入框已隐藏，残留值不写入配置
+                        cond.ReleaseBand = ""; // 输入框已隐藏，残留值不写入配置
                         continue;
                     }
-                    if (!ComparisonHelper.ValidateRelease(cond.Parameter, cond.ReleaseParameter,
+                    if (!ComparisonHelper.ValidateRelease(cond.Parameter, cond.ReleaseBand,
                                                           cond.Comparison, out var releaseError))
                     {
-                        Log($"[保存] 中止：规则 [{rule.Name}] 解除线校验失败 -> {releaseError}");
-                        MessageBox.Show($"规则「{rule.Name}」的解除线有问题：\n\n{releaseError}",
+                        Log($"[保存] 中止：规则 [{rule.Name}] 解除带宽校验失败 -> {releaseError}");
+                        MessageBox.Show($"规则「{rule.Name}」的抖动带宽有问题：\n\n{releaseError}",
                                         "无法保存", MessageBoxButton.OK, MessageBoxImage.Warning);
                         return;
                     }
@@ -741,9 +741,9 @@ public partial class MainWindow : Window, IDisposable
                         break;
                 }
 
-                // 切换后若已不适用解除线（如换成 time/进程/电源），清掉残留值
+                // 切换后若已不适用滞回（如换成 time/进程/电源），清掉残留带宽
                 if (!condition.ShowRelease)
-                    condition.ReleaseParameter = "";
+                    condition.ReleaseBand = "";
             }
         }
     }
@@ -760,7 +760,7 @@ public partial class MainWindow : Window, IDisposable
         if (e.AddedItems.Count == 0 || e.AddedItems[0] is not ComparisonOperator newComparison) return;
 
         if (!RuleCondition.SupportsRelease(condition.Type, newComparison))
-            condition.ReleaseParameter = "";
+            condition.ReleaseBand = "";
     }
 
     private void RemoveCondition_Click(object sender, RoutedEventArgs e)
@@ -868,6 +868,7 @@ public partial class MainWindow : Window, IDisposable
                     Type = condition.Type,
                     Parameter = condition.Parameter,
                     Parameter2 = condition.Parameter2,
+                    ReleaseBand = condition.ReleaseBand,
                     Comparison = condition.Comparison
                 };
 

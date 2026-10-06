@@ -136,7 +136,7 @@ public class LinkerService
                     Type = condition.Type,
                     Parameter = condition.Parameter,
                     Parameter2 = condition.Parameter2,
-                    ReleaseParameter = condition.ReleaseParameter,
+                    ReleaseBand = condition.ReleaseBand,
                     Comparison = condition.Comparison
                 };
                 using var trigger = TriggerRegistry.Create(config);

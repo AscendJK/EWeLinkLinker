@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using EWeLinkLinker.Core.Triggers;
 
 namespace EWeLinkLinker.Core.Models;
 
@@ -94,7 +95,14 @@ public partial class RuleCondition : ObservableObject
     public string Parameter
     {
         get => _parameter;
-        set => SetProperty(ref _parameter, value);
+        set
+        {
+            if (SetProperty(ref _parameter, value))
+            {
+                OnPropertyChanged(nameof(ReleaseParameter));
+                OnPropertyChanged(nameof(ReleaseHint));
+            }
+        }
     }
 
     /// <summary>
@@ -108,15 +116,41 @@ public partial class RuleCondition : ObservableObject
     }
 
     /// <summary>
-    /// 滞回解除线：数值条件触发后，实际值要越过这条线才重新武装。
-    /// 留空表示不启用滞回，维持"不满足即复位"的原行为。
+    /// 滞回解除带宽：阈值附近允许读数抖动多大幅度而不重新武装。
+    /// 配置里存的是这个"意图值"，真正的解除线由它 + 比较符方向派生，
+    /// 所以以后改阈值，回差跟着走，不会悄悄变成另一个值。留空 = 不启用滞回。
     /// </summary>
-    private string _releaseParameter = "";
-    public string ReleaseParameter
+    private string _releaseBand = "";
+    public string ReleaseBand
     {
-        get => _releaseParameter;
-        set => SetProperty(ref _releaseParameter, value);
+        get => _releaseBand;
+        set
+        {
+            if (SetProperty(ref _releaseBand, value))
+            {
+                OnPropertyChanged(nameof(ReleaseParameter));
+                OnPropertyChanged(nameof(ReleaseHint));
+            }
+        }
     }
+
+    /// <summary>
+    /// 旧配置里存的是绝对解除线。读进来先放这里，由 LinkerConfig.Load 反推成带宽后置空，
+    /// 置空后就不会再写回文件，配置会自动收敛到新字段。
+    /// </summary>
+    [System.Text.Json.Serialization.JsonPropertyName("releaseParameter")]
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? LegacyReleaseParameter { get; set; }
+
+    /// <summary>由带宽和比较符方向派生出的实际解除线（用于显示与构造触发器，不写进配置）</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string ReleaseParameter => ComparisonHelper.ResolveRelease(Parameter, ReleaseBand, Comparison);
+
+    /// <summary>界面上把派生结果直接写出来，避免"填的是 5、生效的是多少"看不见</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string ReleaseHint => string.IsNullOrWhiteSpace(ReleaseBand) || string.IsNullOrWhiteSpace(ReleaseParameter)
+        ? ""
+        : $"→ 解除线 {ReleaseParameter}";
 
     /// <summary>
     /// 比较运算符
@@ -131,6 +165,8 @@ public partial class RuleCondition : ObservableObject
             {
                 OnPropertyChanged(nameof(IsRangeComparison));
                 OnPropertyChanged(nameof(ShowRelease));
+                OnPropertyChanged(nameof(ReleaseParameter));
+                OnPropertyChanged(nameof(ReleaseHint));
             }
         }
     }

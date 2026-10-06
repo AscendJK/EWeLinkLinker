@@ -75,6 +75,7 @@ public class LinkerConfig
             foreach (var device in config.Devices)
                 device.Validate();
             SyncActionDeviceNames(config);
+            MigrateLegacyReleaseBands(config);
             return config;
         }
         catch (FileNotFoundException)
@@ -102,6 +103,32 @@ public class LinkerConfig
                 var device = config.Devices.FirstOrDefault(d => d.DeviceId == action.DeviceId);
                 if (device != null && action.Name != device.Name)
                     action.Name = device.Name;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 一次性迁移：旧配置存的是绝对解除线（releaseParameter），换算成"带宽"这个意图值。
+    /// 换算后把旧字段置空，下次保存就不再写出去，配置自动收敛到新模型。
+    /// 落在错误一侧的值（比如 ≤70 配 62）不迁移，留给触发器构造时的校验去拦。
+    /// </summary>
+    private static void MigrateLegacyReleaseBands(LinkerConfig config)
+    {
+        foreach (var rule in config.Rules)
+        {
+            foreach (var c in rule.Conditions)
+            {
+                var legacy = c.LegacyReleaseParameter;
+                c.LegacyReleaseParameter = null;
+                if (string.IsNullOrWhiteSpace(legacy) || !string.IsNullOrWhiteSpace(c.ReleaseBand)) continue;
+                if (!float.TryParse(c.Parameter, out var trigger)) continue;
+                if (!float.TryParse(legacy, out var release)) continue;
+
+                var rise = c.Comparison is ComparisonOperator.Gte or ComparisonOperator.Gt;
+                var fall = c.Comparison is ComparisonOperator.Lte or ComparisonOperator.Lt;
+                if (!((rise && release < trigger) || (fall && release > trigger))) continue;
+
+                c.ReleaseBand = Math.Abs(release - trigger).ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
             }
         }
     }
