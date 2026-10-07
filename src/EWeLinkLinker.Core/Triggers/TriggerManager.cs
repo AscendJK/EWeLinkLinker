@@ -131,6 +131,10 @@ public sealed class TriggerManager : IAsyncDisposable
     {
         foreach (var trigger in _ruleTriggers.Values.SelectMany(rt => rt.GetTriggers()))
         {
+            // 必须先 Start 再 PollAsync：PollAsync 里靠 "State == Monitoring" 决定要不要把
+            // 满足转成 Triggered，Idle 状态下读到的值不会写进状态 ⇒ 基线永远是"不满足"，
+            // 第一轮真轮询就变成一个上升沿 ⇒ 服务一起来就把已满足的规则重发一遍。
+            trigger.Start();
             await trigger.PollAsync();
         }
 

@@ -24,6 +24,16 @@ public sealed class RuleTrigger : IDisposable, IPostPollCallback
     private bool _disposed;
     private bool _previousCompositeResult; // 防重复触发
 
+    /// <summary>
+    /// 规则级"上次发出动作"的时刻。最长粘住计时必须挂在规则上而不是挂在每个条件上：
+    /// 每个条件各一个钟时，一条 AND 规则每满一次计时就会被每个条件各逼重发一次
+    /// （生产实测规则 3 两个条件 ⇒ 每小时约 4 次，而不是口径说的每 30 分钟一次）。
+    /// </summary>
+    private DateTime? _actionStampedUtc;
+
+    /// <summary>强制重判要两拍：这一拍记下降沿，下一拍才允许升回去发动作。</summary>
+    private bool _reArmPending;
+
     public RuleTrigger(LinkerRule rule, LinkerService linkerService, ServiceLogger logger, PollingScheduler scheduler)
     {
         _rule = rule;
@@ -62,15 +72,31 @@ public sealed class RuleTrigger : IDisposable, IPostPollCallback
     {
         if (_disposed || !_rule.Enabled) return;
 
-        bool currentResult = EvaluateCompositeCondition();
-
-        var states = string.Join(", ", _conditionTriggers.Select((t, i) =>
-            $"{_rule.Conditions[i].Type}={t.State}"));
-        _logger.Info($"[RuleTrigger:{_rule.Name}] {states} => {(currentResult ? "满足" : "不满足")}");
-
-        // H-17 修复：lock 保护边沿检测逻辑
+        // H-17 修复：lock 保护边沿检测逻辑（复合判定也搬进锁里：判定与边沿记账必须是一个原子动作）
         lock (_evalLock)
         {
+            var nowUtc = DateTime.UtcNow;
+            var currentResult = EvaluateCompositeCondition();
+
+            if (_reArmPending)
+            {
+                // 上一轮已经按"不满足"记过一笔下降沿，这一轮正常判定：条件还锁着 ⇒ 立刻变成上升沿 ⇒ 重发
+                _reArmPending = false;
+            }
+            else if (currentResult && ComparisonHelper.IsHoldExpired(_actionStampedUtc, nowUtc))
+            {
+                // 本轮当作"不满足"造一个下降沿；条件还锁着，所以下一轮重新变成满足 ⇒ 一次上升沿 ⇒
+                // 整套动作重发。计时挂在规则上，不是每个条件各挂一个（那样一条 AND 规则会被乘倍）。
+                // 注意必须两拍：单靠"本轮判 false"不会刷新盖章，下一轮"计时已过期"仍然成立，
+                // 于是每一轮都被按成不满足，永远等不到上升沿，动作一次都发不出去。
+                _reArmPending = true;
+                _logger.Info($"规则 [{_rule.Name}] 已连续满足满 {ComparisonHelper.MaxReleaseHold}，本轮强制重判（纠偏：设备可能被人手动改过）");
+                currentResult = false;
+            }
+
+            var states = string.Join(", ", _conditionTriggers.Select((t, i) =>
+                $"{_rule.Conditions[i].Type}={t.State}"));
+            _logger.Info($"[RuleTrigger:{_rule.Name}] {states} => {(currentResult ? "满足" : "不满足")}");
             // 边沿检测：只在从"不满足"变为"满足"时触发
             if (currentResult && !_previousCompositeResult)
             {
@@ -81,6 +107,7 @@ public sealed class RuleTrigger : IDisposable, IPostPollCallback
                 }));
 
                 _logger.LogRuleTriggered(_rule.Name, reason);
+                _actionStampedUtc = nowUtc;
 
                 _ = Task.Run(async () =>
                 {
@@ -110,7 +137,12 @@ public sealed class RuleTrigger : IDisposable, IPostPollCallback
         {
             _previousCompositeResult = EvaluateCompositeCondition();
             if (_previousCompositeResult)
+            {
+                // 基线也起表：启动时就已满足的规则，第一次纠偏同样要等满一个计时周期，
+                // 而不是服务一起来就补发一次
+                _actionStampedUtc = DateTime.UtcNow;
                 _logger.Info($"规则 [{_rule.Name}] 启动时条件已满足，按基线处理（本次不执行动作）");
+            }
         }
     }
 

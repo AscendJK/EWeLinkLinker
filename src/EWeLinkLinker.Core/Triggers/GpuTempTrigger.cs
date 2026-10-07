@@ -18,7 +18,6 @@ public class GpuTempTrigger : OptimizedTriggerBase
     private readonly string _releaseParameter;
     private readonly ComparisonOperator _comparison;
     private bool _wasTriggered;
-    private DateTime? _latchedSinceUtc;
     private int _pollCount;
     // 当前实际读取的传感器名称（供日志诊断：确认是否选到 GPU Core / Hot Spot / Memory）
     private static string? _sensorName;
@@ -76,21 +75,8 @@ public class GpuTempTrigger : OptimizedTriggerBase
 
         if (float.IsNaN(temp)) return ValueTask.FromResult(false);
 
-        var nowUtc = DateTime.UtcNow;
-
-        // 锁存超时：强制松开，让本轮重新判定。读数仍然满足时也会重发一次动作，
-        // 用来纠正"规则以为已经处理过、设备其实被人手动改过"。只在启用滞回时生效。
-        if (_wasTriggered && !string.IsNullOrEmpty(_releaseParameter)
-            && ComparisonHelper.IsHoldExpired(_latchedSinceUtc, nowUtc))
-        {
-            _wasTriggered = false;
-            _latchedSinceUtc = null;
-            State = TriggerState.Monitoring;
-            // 这一轮只松开，不顺手补一个脉冲：否则 PollAsync 拿到的是过期的 wasMonitoring，
-            // 状态回不到 Triggered，日志写着"条件触发"而规则那边判定为不满足、不会执行动作。
-            // 动作交给下一轮真正的上升沿发出。
-            return ValueTask.FromResult(false);
-        }
+        // 最长粘住的计时挂在规则上（RuleTrigger），不在这里：每个条件各一个钟会让
+        // 一条 AND 规则每满一次计时被每个条件各逼重发一次。
 
         // 滞回：已锁存时，只有越过解除线才算不再满足
         var isTriggered = ComparisonHelper.Evaluate(temp, _parameter, _parameter2, _comparison)
@@ -111,7 +97,6 @@ public class GpuTempTrigger : OptimizedTriggerBase
         if (isTriggered && !_wasTriggered)
         {
             _wasTriggered = true;
-            _latchedSinceUtc = DateTime.UtcNow;
             return ValueTask.FromResult(true);
         }
 
@@ -119,7 +104,6 @@ public class GpuTempTrigger : OptimizedTriggerBase
         if (!isTriggered && _wasTriggered)
         {
             _wasTriggered = false;
-            _latchedSinceUtc = null;
             State = TriggerState.Monitoring;
         }
 

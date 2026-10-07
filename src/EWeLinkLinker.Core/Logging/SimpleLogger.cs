@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 
 namespace EWeLinkLinker.Core.Logging;
@@ -13,6 +14,30 @@ public static class SimpleLogger
     private static string? _logPath;
     private static long _writeCount;
     private static StreamWriter? _writer;  // 复用 StreamWriter，避免频繁 new FileStream
+    private static DateTime _writerDate = DateTime.MinValue;
+
+    /// <summary>
+    /// 文件名里带日期时（服务端的 service-detail-yyyy-MM-dd.log），跨零点必须自己换文件：
+    /// 路径是启动时算一次的，不滚就会整天往昨天的文件里写。
+    /// </summary>
+    private static void RollToTodayLocked()
+    {
+        if (_logPath == null) return;
+        var today = DateTime.Now.Date;
+        if (_writerDate == today) return;
+        _writerDate = today;
+
+        var name = Path.GetFileName(_logPath);
+        var m = Regex.Match(name, @"\d{4}-\d{2}-\d{2}");
+        if (!m.Success) return;   // 不带日期的（GUI 的 debug.log）不动
+
+        var rolled = Path.Combine(Path.GetDirectoryName(_logPath) ?? "",
+            name.Remove(m.Index, m.Length).Insert(m.Index, today.ToString("yyyy-MM-dd")));
+        if (rolled == _logPath) return;
+        _writer?.Dispose();
+        _writer = null;
+        _logPath = rolled;
+    }
 
     /// <summary>
     /// Initialize the logger with a log file path. Call once at startup.
@@ -38,6 +63,7 @@ public static class SimpleLogger
         {
             lock (LogLock)
             {
+                RollToTodayLocked();
                 // 复用 StreamWriter，避免每次 AppendAllText 都 new FileStream/StreamWriter
                 if (_writer == null)
                 {

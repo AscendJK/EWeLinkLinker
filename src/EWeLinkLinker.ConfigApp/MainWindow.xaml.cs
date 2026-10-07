@@ -324,6 +324,20 @@ public partial class MainWindow : Window, IDisposable
                 }
             }
 
+            // 磁盘上有解不开的凭据（DPAPI 换机/重装/手改），而内存里也还没有可以替换它的新凭据 ⇒ 不许覆盖。
+            // 他重新填账号并「登录获取设备」之后，内存里就有了新值，这条自然放行。
+            if (LinkerConfig.HasUndecryptableProtectedField(_configPath)
+                && string.IsNullOrEmpty(_accessToken) && string.IsNullOrEmpty(PasswordBox.Password))
+            {
+                Log("[保存] 中止：磁盘上有解不开的凭据字段，而内存里没有可替换的新凭据");
+                if (interactive)
+                    MessageBox.Show("配置文件里的账号凭据在这台机器上解不开（通常是配置从别的机器拷来，或系统重装过）。\n\n" +
+                                    "为避免把唯一还存在的那份凭据抹掉，本次没有保存。\n" +
+                                    "请在「账号/密码」里重新填写，再点「登录获取设备」拿到新凭据。",
+                                    "凭据无法解密", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return SaveOutcome.Aborted;
+            }
+
             // 防止回写覆盖：如果磁盘 token 非空且与内存不同，说明被服务端 TokenManager 刷新过
             // 优先用磁盘 token（服务端写入的新 token）
             // 例外：本次会话刚登录/自愈拿到的是**更新**的 token，磁盘那份才是旧的，不能反过来覆盖

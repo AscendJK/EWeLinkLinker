@@ -118,7 +118,10 @@ public abstract class OptimizedTriggerBase : ITrigger
     public virtual void Start()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        State = TriggerState.Monitoring;
+        // 已经是 Triggered 就不要打回 Monitoring：调度器 Start() 会对每个触发器再调一次 Start()，
+        // 那会把播种刚测出来的"已满足"清掉，于是第一轮真轮询被当成新上升沿，
+        // 服务一起来就把本来已经满足的规则重发一遍动作。
+        if (State != TriggerState.Triggered) State = TriggerState.Monitoring;
         OnStart();
     }
 

@@ -48,14 +48,15 @@ public sealed class ServiceLogger : IDisposable
         try
         {
             var cutoff = DateTime.Now.AddDays(-7);
+            // 文件名里的日期用正则取，不能用固定偏移：service-detail-2026-10-06.log 在偏移 8 处
+            // 取到的是 "detail-202"，解析失败 ⇒ 唯一带 [AUDIT] 和真实读数的 detail 通道永远不被清理
             var oldFiles = Directory.GetFiles(logDir, "service-*.log")
-                .Where(f => Path.GetFileName(f).Length >= 22 &&
-                           DateTime.TryParseExact(
-                               Path.GetFileName(f).Substring(8, 10),
-                               "yyyy-MM-dd",
-                               null,
-                               System.Globalization.DateTimeStyles.None,
-                               out var date) && date < cutoff);
+                .Where(f =>
+                {
+                    var m = Regex.Match(Path.GetFileName(f), @"\d{4}-\d{2}-\d{2}");
+                    return m.Success && DateTime.TryParseExact(m.Value, "yyyy-MM-dd", null,
+                        System.Globalization.DateTimeStyles.None, out var date) && date < cutoff;
+                });
             foreach (var file in oldFiles)
             {
                 try { File.Delete(file); } catch { }

@@ -44,9 +44,70 @@ public class LinkerConfig
             var decrypted = ProtectedData.Unprotect(bytes, Entropy, DataProtectionScope.LocalMachine);
             return Encoding.UTF8.GetString(decrypted);
         }
+        catch (Exception ex)
+        {
+            // 以前这里把密文原样返回：调用方会拿一段 base64 垃圾去当密码/令牌用，
+            // 云端报"凭证失效"，GUI 再把它 Protect 一遍存回去 ⇒ 同一段密文被二次加密，永久解不回来。
+            // 解不开就是解不开，返回空并让上层用 HasUndecryptableProtectedField 判断要不要拒绝写盘。
+            System.Diagnostics.Debug.WriteLine($"[LinkerConfig] DPAPI 解密失败({ex.GetType().Name})，该字段按空值处理");
+            return string.Empty;
+        }
+    }
+
+    private static readonly (string Obj, string Field)[] ProtectedJsonFields =
+    {
+        ("account", "password"), ("tokens", "accessToken"), ("tokens", "refreshToken"), ("tokens", "userApiKey"),
+    };
+
+    /// <summary>磁盘上该字段有密文但本机解不开。</summary>
+    private static bool FieldUndecryptable(JsonElement root, string obj, string field)
+    {
+        if (!root.TryGetProperty(obj, out var o) || o.ValueKind != JsonValueKind.Object) return false;
+        if (!o.TryGetProperty(field, out var v) || v.ValueKind != JsonValueKind.String) return false;
+        var raw = v.GetString();
+        return !string.IsNullOrEmpty(raw) && string.IsNullOrEmpty(Unprotect(raw));
+    }
+
+    /// <summary>
+    /// 磁盘上存在密文、但本机 DPAPI 解不开（换机器、系统重装、字段被手改）⇒ 返回 true。
+    /// 只看能不能解开，不返回任何内容。上层据此拒绝"用内存这份覆盖磁盘那份"。
+    /// </summary>
+    public static bool HasUndecryptableProtectedField(string path) => ScanProtectedFile(path, FieldUndecryptable);
+
+    private static bool ScanProtectedFile(string path, Func<JsonElement, string, string, bool> test)
+    {
+        try
+        {
+            if (!File.Exists(path)) return false;
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return false;
+            return ProtectedJsonFields.Any(f => test(root, f.Obj, f.Field));
+        }
         catch
         {
-            return cipherText;
+            return false;
+        }
+    }
+
+    /// <summary>要写的这份里对应字段是空的，而磁盘上那份解不开 ⇒ 覆盖就等于把唯一存在的凭据丢掉。</summary>
+    private bool WouldWipeUndecryptable(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return false;
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return false;
+            var root = doc.RootElement;
+
+            return FieldUndecryptable(root, "account", "password") && string.IsNullOrEmpty(Account.Password)
+                || FieldUndecryptable(root, "tokens", "accessToken") && string.IsNullOrEmpty(Tokens.AccessToken)
+                || FieldUndecryptable(root, "tokens", "refreshToken") && string.IsNullOrEmpty(Tokens.RefreshToken)
+                || FieldUndecryptable(root, "tokens", "userApiKey") && string.IsNullOrEmpty(Tokens.UserApiKey);
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -222,6 +283,14 @@ public class LinkerConfig
         try
         {
             fileLock = TryAcquireFileLock(path);
+
+            // 服务侧的 TokenManager 也会整份重写：解不开旧密文而内存是空的时候落盘，
+            // 就等于把唯一还存在的凭据字节抹掉，这里挡住（返回 false，调用方按保存失败处理）
+            if (WouldWipeUndecryptable(path))
+            {
+                System.Diagnostics.Debug.WriteLine($"Config save refused: undecryptable credentials on disk, {path}");
+                return false;
+            }
 
             var dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
