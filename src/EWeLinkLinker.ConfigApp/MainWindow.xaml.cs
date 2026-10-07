@@ -288,7 +288,8 @@ public partial class MainWindow : Window, IDisposable
                             as string ?? cond.Comparison.ToString();
                         problem = $"「{cmpText}」这种比较方式，这类条件没有实现；选它规则就永远不执行（也不会报错）";
                     }
-                    else if (!TriggerRegistry.TryValidate(new TriggerConfig
+                    else if (!TriggerManager.IsPowerCondition(cond.Type)
+                             && !TriggerRegistry.TryValidate(new TriggerConfig
                     {
                         Type = cond.Type,
                         Parameter = cond.Parameter,
@@ -297,6 +298,8 @@ public partial class MainWindow : Window, IDisposable
                         Comparison = cond.Comparison
                     }, out var buildError))
                     {
+                        // 电源事件类（开机/关机/睡眠/唤醒）压根不在注册表里——那是服务的系统事件路径处理的，
+                        // 拿注册表去问它必然回"Unknown trigger type"。上一版就这么把「规则 1」拦住了。
                         problem = buildError;
                     }
 
@@ -919,7 +922,19 @@ public partial class MainWindow : Window, IDisposable
                 // 会让服务端建不出触发器，而 TriggerManager 的处理是**跳过整条规则连同它所有动作**，
                 // 界面这边却已经弹了「配置已保存！」——用户完全看不出规则已经死了。
                 var oldParameter = condition.Parameter;
-                if (!TriggerRegistry.TryValidate(new TriggerConfig
+                var oldType = (e.RemovedItems[0] as ComboBoxItem)?.Tag as string ?? "?";
+                string Show(string v) => string.IsNullOrEmpty(v) ? "(空)" : v;
+
+                if (TriggerManager.IsPowerCondition(tag))
+                {
+                    // 电源事件类压根不需要参数（注册表里也没有这四类，那是服务的系统事件路径）。
+                    // 参数输入框已经藏起来了，留着上一条的残值就是界面上看不见、配置文件里却有的脏值。
+                    condition.Parameter = "";
+                    condition.Parameter2 = "";
+                    if (!string.IsNullOrEmpty(oldParameter))
+                        Log($"[条件] 类型 {oldType} → {tag}：这类条件不用参数，原来的「{Show(oldParameter)}」已清空");
+                }
+                else if (!TriggerRegistry.TryValidate(new TriggerConfig
                 {
                     Type = tag,
                     Parameter = condition.Parameter,
@@ -928,9 +943,8 @@ public partial class MainWindow : Window, IDisposable
                     Comparison = condition.Comparison
                 }, out _))
                 {
-                    var oldType = (e.RemovedItems[0] as ComboBoxItem)?.Tag as string ?? "?";
                     condition.Parameter = condition.DefaultParameter;
-                    Log($"[条件] 类型 {oldType} → {tag}：原参数「{(string.IsNullOrEmpty(oldParameter) ? "(空)" : oldParameter)}」对新类型不可用，已重置为「{(string.IsNullOrEmpty(condition.Parameter) ? "(空)" : condition.Parameter)}」");
+                    Log($"[条件] 类型 {oldType} → {tag}：原参数「{Show(oldParameter)}」对新类型不可用，已重置为「{Show(condition.Parameter)}」");
                 }
             }
         }
@@ -1120,11 +1134,8 @@ public partial class MainWindow : Window, IDisposable
     /// <summary>
     /// 判断是否为电源事件类型（无法手动测试）
     /// </summary>
-    private static bool IsPowerEventType(string type) =>
-        type.Equals("boot", StringComparison.OrdinalIgnoreCase) ||
-        type.Equals("shutdown", StringComparison.OrdinalIgnoreCase) ||
-        type.Equals("sleep", StringComparison.OrdinalIgnoreCase) ||
-        type.Equals("wake", StringComparison.OrdinalIgnoreCase);
+    // 判据用服务端那一份：界面这里原来另抄了一份四类名单，两处清单各写各的正是"保存被误拦"这类错的来路
+    private static bool IsPowerEventType(string type) => TriggerManager.IsPowerCondition(type);
 
     /// <summary>
     /// 获取触发器的当前状态信息（用于测试显示）
