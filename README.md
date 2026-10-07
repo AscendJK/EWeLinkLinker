@@ -27,12 +27,18 @@
 build-all.bat
 ```
 
-或手动构建：
+或手动构建（`build-all.bat` 做的就是这两条 `publish`，`build` 只产出 `bin\` 下的中间产物，
+不会填 `publish\ConfigApp` 和 `publish\Service`，而服务和 ConfigApp 跑的就是那两个目录）：
 
 ```bash
 dotnet restore
-dotnet build -c Release
+dotnet publish src\EWeLinkLinker.ConfigApp\EWeLinkLinker.ConfigApp.csproj -c Release -o publish\ConfigApp --self-contained false
+dotnet publish src\EWeLinkLinker.Service\EWeLinkLinker.Service.csproj -c Release -o publish\Service --self-contained false
 ```
+
+> 发布前先停服务：`publish\Service` 里的 exe/dll 在服务运行期间被锁住，直接发布会得到
+> "构建失败"或一个半成品目录。`build-all.bat` 会先 `sc query` 检查并在服务在跑时拒绝构建；
+> 手工执行这两条命令时没有这道保护，需要自己先停（ConfigApp 点「停止」，或 `net stop EWeLinkLinker`）。
 
 ### 2. 配置并运行
 
@@ -65,7 +71,7 @@ dotnet build -c Release
 ### 4. 安装服务
 
 ConfigApp 中：
-1. 点击 **"安装"**（需要管理员权限，UAC 提示）
+1. 点击 **"安装"**（需要管理员权限）
 2. 点击 **"启动"** 启动服务
 
 或使用 PowerShell 脚本（同样需要管理员权限）：
