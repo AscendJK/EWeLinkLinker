@@ -1242,10 +1242,20 @@ public partial class MainWindow : Window, IDisposable
             {
                 Log($"安装服务: 停止旧服务...");
                 await RunScCommand($"stop {ServiceName}", true);
-                await Task.Delay(1000);
+                await WaitForStatusAsync("STOPPED", 8000);
                 Log($"安装服务: 删除旧服务...");
-                await RunScCommand($"delete {ServiceName}", true);
-                await Task.Delay(1000);
+                var delCode = await RunScCommand($"delete {ServiceName}", true);
+                var gone = await WaitForStatusAsync("NOT_INSTALLED", 5000);
+                if (delCode != 0 || gone != "NOT_INSTALLED")
+                {
+                    // 旧服务还在，下一步 sc create 必然回 1056；与其弹一句看不懂的"创建失败"，
+                    // 不如在这里把真实情况说清楚
+                    MessageBox.Show($"旧服务没能删干净（sc delete 退出码 {delCode}，当前状态 {gone}）。\n" +
+                                    "通常是有句柄还开着，等几秒再点一次「安装服务」。",
+                                    "安装服务", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    await UpdateServiceStatusAsync();
+                    return;
+                }
             }
 
             // 2. 创建新服务
@@ -1275,15 +1285,21 @@ public partial class MainWindow : Window, IDisposable
                 }
             }
 
-            // 3. 设置描述
-            await RunScCommand($"description {ServiceName} \"Automatically controls eWeLink devices based on PC power events\"", true);
-            await Task.Delay(500);
+            // 3. 设置描述（不影响能不能跑，失败只记一笔）
+            var descCode = await RunScCommand($"description {ServiceName} \"Automatically controls eWeLink devices based on PC power events\"", true);
 
             // 4. 启动服务
             Log($"安装服务: 启动服务...");
-            await RunScCommand($"start {ServiceName}", true);
+            var startCode = await RunScCommand($"start {ServiceName}", true);
+            var finalStatus = await WaitForStatusAsync("RUNNING", 10000);
+            Log($"安装服务结果: start 退出码={startCode}，最终状态={finalStatus}，描述退出码={descCode}");
 
-            MessageBox.Show("服务安装完成！", "安装服务", MessageBoxButton.OK, MessageBoxImage.Information);
+            if (finalStatus == "RUNNING")
+                MessageBox.Show("服务已安装并正在运行。", "安装服务", MessageBoxButton.OK, MessageBoxImage.Information);
+            else
+                MessageBox.Show($"服务已经创建，但**没有运行起来**。\nsc start 退出码：{startCode}\n当前状态：{finalStatus}\n\n" +
+                                "可以到「打开日志文件夹」里看服务日志找原因。",
+                                "部分完成", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
         catch (System.ComponentModel.Win32Exception)
         {
@@ -1313,9 +1329,14 @@ public partial class MainWindow : Window, IDisposable
             // 停止服务
             try
             {
-                await RunScCommand($"stop {ServiceName}");
-                Log("停止服务: 命令已发送");
-                MessageBox.Show("服务已停止。", "停止服务", MessageBoxButton.OK, MessageBoxImage.Information);
+                var code = await RunScCommand($"stop {ServiceName}");
+                var now = await WaitForStatusAsync("STOPPED", 8000);
+                Log($"停止服务: sc 退出码={code}，等待后状态={now}");
+                if (now == "STOPPED")
+                    MessageBox.Show("服务已停止。", "停止服务", MessageBoxButton.OK, MessageBoxImage.Information);
+                else
+                    MessageBox.Show($"停止命令没能把服务停下来。\nsc 退出码：{code}\n当前状态：{now}",
+                                    "未停止", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
             catch (Exception ex)
             {
@@ -1327,9 +1348,15 @@ public partial class MainWindow : Window, IDisposable
             // 启动服务
             try
             {
-                await RunScCommand($"start {ServiceName}");
-                Log("启动服务: 命令已发送");
-                MessageBox.Show("服务启动成功！", "启动服务", MessageBoxButton.OK, MessageBoxImage.Information);
+                var code = await RunScCommand($"start {ServiceName}");
+                var now = await WaitForStatusAsync("RUNNING", 8000);
+                Log($"启动服务: sc 退出码={code}，等待后状态={now}");
+                if (now == "RUNNING")
+                    MessageBox.Show("服务已运行。", "启动服务", MessageBoxButton.OK, MessageBoxImage.Information);
+                else
+                    MessageBox.Show($"服务没有起来。\nsc 退出码：{code}\n当前状态：{now}\n\n" +
+                                    "常见原因是服务程序本身启动失败，请看服务日志。",
+                                    "启动失败", MessageBoxButton.OK, MessageBoxImage.Warning);
             }
             catch (Exception ex)
             {
@@ -1452,11 +1479,17 @@ public partial class MainWindow : Window, IDisposable
             if (status == "RUNNING" || status == "PAUSED")
             {
                 await RunScCommand($"stop {ServiceName}");
-                await Task.Delay(1000);
+                await WaitForStatusAsync("STOPPED", 8000);
             }
-            await RunScCommand($"delete {ServiceName}");
-            Log("卸载服务: 命令已发送");
-            MessageBox.Show("服务已卸载。", "卸载服务", MessageBoxButton.OK, MessageBoxImage.Information);
+            var delCode = await RunScCommand($"delete {ServiceName}");
+            // sc delete 可能只是"标记删除"（1072），要等 SCM 关掉句柄才真没；查两秒
+            var now = await WaitForStatusAsync("NOT_INSTALLED", 3000);
+            Log($"卸载服务: sc delete 退出码={delCode}，等待后状态={now}");
+            if (now == "NOT_INSTALLED")
+                MessageBox.Show("服务已卸载。", "卸载服务", MessageBoxButton.OK, MessageBoxImage.Information);
+            else
+                MessageBox.Show($"服务还没被删除干净。\nsc delete 退出码：{delCode}\n当前状态：{now}",
+                                "未卸载", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
         catch (Exception ex)
         {
@@ -1506,7 +1539,13 @@ public partial class MainWindow : Window, IDisposable
         }
     }
 
-    private async Task RunScCommand(string arguments, bool suppressErrors = false)
+    /// <summary>
+    /// 跑一条 sc.exe，把**退出码**交回调用方。以前它返回 Task 且非零码只在 suppressErrors=false 时弹窗，
+    /// 调用方一律把"没抛异常"当成功，于是 sc start 失败也弹「服务启动成功！」、
+    /// 安装流程末尾无条件弹「服务安装完成！」。失败与否现在由调用方按码＋真实服务状态判定。
+    /// -1 表示进程根本没跑起来（含 UAC 被拒，那条仍会抛出）。
+    /// </summary>
+    private async Task<int> RunScCommand(string arguments, bool suppressErrors = false)
     {
         try
         {
@@ -1520,32 +1559,34 @@ public partial class MainWindow : Window, IDisposable
                 WindowStyle = ProcessWindowStyle.Hidden
             };
             using var process = Process.Start(psi);
-            if (process != null)
+            if (process == null)
             {
-                await process.WaitForExitAsync();
-                Log($"sc.exe {arguments} -> 退出码 {process.ExitCode}");
-                // 检查退出码：0=成功，其他=失败
-                if (process.ExitCode != 0 && !suppressErrors)
-                {
-                    var errorDetail = process.ExitCode switch
-                    {
-                        1060 => "服务未安装",
-                        1056 => "服务已存在",
-                        1062 => "服务未启动",
-                        1058 => "服务已禁用",
-                        1072 => "服务标记为删除",
-                        _ => $"错误码 {process.ExitCode}"
-                    };
-                    if (!suppressErrors)
-                        MessageBox.Show($"sc.exe 操作失败: {errorDetail}\n命令: sc {arguments}", "服务控制失败", MessageBoxButton.OK, MessageBoxImage.Warning);
-                }
+                Log($"sc.exe {arguments} -> 进程没起来（拿不到句柄）");
+                return -1;
             }
+            await process.WaitForExitAsync();
+            Log($"sc.exe {arguments} -> 退出码 {process.ExitCode}");
+            // 检查退出码：0=成功，其他=失败
+            if (process.ExitCode != 0 && !suppressErrors)
+            {
+                var errorDetail = process.ExitCode switch
+                {
+                    1060 => "服务未安装",
+                    1056 => "服务已存在",
+                    1062 => "服务未启动",
+                    1058 => "服务已禁用",
+                    1072 => "服务标记为删除（等 SCM 关完句柄才会真删）",
+                    _ => $"错误码 {process.ExitCode}"
+                };
+                MessageBox.Show($"sc.exe 操作失败: {errorDetail}\n命令: sc {arguments}", "服务控制失败", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+            return process.ExitCode;
         }
         catch (System.ComponentModel.Win32Exception)
         {
-            // UAC 被拒绝
+            // UAC 被拒绝。这台机器是静默放行的，所以不提"点『是』"这种根本不存在的步骤
             if (!suppressErrors)
-                MessageBox.Show("需要管理员权限！请点击\"是\"允许 UAC 提示。", "权限不足", MessageBoxButton.OK, MessageBoxImage.Warning);
+                MessageBox.Show("这一步需要管理员权限，提权被取消或没通过。", "权限不足", MessageBoxButton.OK, MessageBoxImage.Warning);
             throw;
         }
         catch (Exception ex)
@@ -1554,6 +1595,22 @@ public partial class MainWindow : Window, IDisposable
                 MessageBox.Show($"操作失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
             throw;
         }
+    }
+
+    /// <summary>
+    /// sc start/stop 是"命令已受理"而不是"已经到位"，所以文案只能等真状态。
+    /// 最多等 timeoutMs，期间每 400ms 查一次；返回最后看到的状态。
+    /// </summary>
+    private async Task<string> WaitForStatusAsync(string want, int timeoutMs)
+    {
+        var deadline = Environment.TickCount64 + timeoutMs;
+        var status = await GetServiceStatusAsync();
+        while (status != want && Environment.TickCount64 < deadline)
+        {
+            await Task.Delay(400);
+            status = await GetServiceStatusAsync();
+        }
+        return status;
     }
 
     private async Task UpdateServiceStatusAsync()
@@ -1644,12 +1701,26 @@ public partial class MainWindow : Window, IDisposable
             var config = LinkerConfig.Load(_configPath);
             LoggingCheckBox.IsChecked = config.LoggingEnabled;
 
-            // 同步轮询间隔下拉框
+            // 同步轮询间隔下拉框。盘上的合法值不一定在下拉那几个档里（手改 7 秒就行），
+            // 以前这种情况被强制按成"5 秒"，SelectionChanged 立刻把 5 写回配置——
+            // 你手改的值就在状态刷新的第一秒被悄悄改掉。现在认不出来就不动控件、也不写盘。
             int[] intervals = { 1, 2, 3, 5, 10, 15, 30 };
             int index = Array.IndexOf(intervals, config.PollingIntervalSeconds);
-            PollingIntervalCombo.SelectedIndex = index >= 0 ? index : 3; // 默认 5s
+            if (index >= 0)
+            {
+                PollingIntervalCombo.SelectedIndex = index;
+            }
+            else if (PollingIntervalCombo.SelectedIndex != -1)
+            {
+                PollingIntervalCombo.SelectedIndex = -1;   // 空白＝"不在预设档里"，handler 对 -1 直接早退
+                Log($"[设置] 盘上轮询间隔 {config.PollingIntervalSeconds}s 不在下拉预设档里，界面不改动它");
+            }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            // 这里以前是裸 catch{}：状态同步失败在 GUI 侧一个字都不留
+            Log($"[设置] 同步日志开关/轮询间隔失败: {ex.Message}");
+        }
     }
 
     // ─── Login ──────────────────────────────────────────
