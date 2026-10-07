@@ -118,6 +118,10 @@ public abstract class OptimizedTriggerBase : ITrigger
         catch (Exception)
         {
             State = TriggerState.Error;
+            // 抛异常同样等于"这一轮没有定论"。不置这个旗标，播种会把异常轮当成
+            // "读到值了、判定为不满足"就收工建基线，传感器恢复后第一轮真读数便成了
+            // 上升沿 ⇒ 服务一起来把已满足的规则重发一遍（NaN 那条路今天已经补了，这是同一条判定的第二个出口）。
+            LastReadingAvailable = false;
             return false;
         }
     }

@@ -90,7 +90,20 @@ public class TokenManager(CloudClient cloudClient, string configPath) : IDisposa
         if (!string.IsNullOrEmpty(newTokens.UserApiKey))
             freshConfig.Tokens.UserApiKey = newTokens.UserApiKey;
         if (!freshConfig.Save(configPath))
-            Logging.SimpleLogger.Log($"[Token] 刷新后的 token 未能写入配置，下次仍会用旧 token: {configPath}");
+        {
+            // 这条不能只留一行 detail：盘上那份 refresh token 已经被云端消耗掉了，
+            // 新的只活在内存里，服务一重启就拿着死 rt 再也换不动，只能人工重新登录一次。
+            // 仍然返回新 token（内存里这份是有效的，本轮设备命令要继续走），但要把话说明白。
+            var msg = $"[ERROR][Token] 刷新成功但新 token 未能写入配置，进程重启后会退回已被云端消耗的旧 rt，需要重新登录一次: {configPath}";
+            Logging.SimpleLogger.Log(msg);
+            try
+            {
+                System.Diagnostics.EventLog.WriteEntry("Application",
+                    "EWeLinkLinker: refreshed tokens could not be persisted to " + configPath,
+                    System.Diagnostics.EventLogEntryType.Error);
+            }
+            catch { }
+        }
 
         return newTokens;
     }

@@ -90,25 +90,60 @@ public class LinkerConfig
         }
     }
 
-    /// <summary>要写的这份里对应字段是空的，而磁盘上那份解不开 ⇒ 覆盖就等于把唯一存在的凭据丢掉。</summary>
-    private bool WouldWipeUndecryptable(string path)
+    /// <summary>
+    /// 磁盘上某个凭据字段是解不开的密文，而这一份要写的是空值 ⇒ 把磁盘那段密文原样搬过来。
+    /// 以前这里是对**整份**配置做判断（任一字段命中就返回 false、一个字节都不写），代价太重：
+    /// account.password 坏了会连带把刚换到的合法 token 也永远写不进去
+    /// （TokenManager 拿着已被云端消耗掉的旧 rt 继续活在自己那份配置里，服务一重启就彻底失效）。
+    /// 逐字段保留之后：坏掉的那一个保持原样（还是解不开，但至少没丢），其余字段照常落盘。
+    /// </summary>
+    private static string PreserveUndecryptableFields(string path, string json)
     {
         try
         {
-            if (!File.Exists(path)) return false;
-            using var doc = JsonDocument.Parse(File.ReadAllText(path));
-            if (doc.RootElement.ValueKind != JsonValueKind.Object) return false;
-            var root = doc.RootElement;
+            if (!File.Exists(path)) return json;
+            using var diskDoc = JsonDocument.Parse(File.ReadAllText(path));
+            if (diskDoc.RootElement.ValueKind != JsonValueKind.Object) return json;
+            var diskRoot = diskDoc.RootElement;
 
-            return FieldUndecryptable(root, "account", "password") && string.IsNullOrEmpty(Account.Password)
-                || FieldUndecryptable(root, "tokens", "accessToken") && string.IsNullOrEmpty(Tokens.AccessToken)
-                || FieldUndecryptable(root, "tokens", "refreshToken") && string.IsNullOrEmpty(Tokens.RefreshToken)
-                || FieldUndecryptable(root, "tokens", "userApiKey") && string.IsNullOrEmpty(Tokens.UserApiKey);
+            var node = JsonNode.Parse(json)!.AsObject();
+            var changed = false;
+            foreach (var (obj, field) in ProtectedJsonFields)
+            {
+                if (!FieldUndecryptable(diskRoot, obj, field)) continue;
+
+                // 要写的这一份里该字段是不是空？空才需要搬，非空说明内存里真有新值可以替换
+                var writingEmpty = true;
+                if (node[obj] is JsonObject o
+                    && o.TryGetPropertyValue(field, out var v)
+                    && v is not null && v.GetValueKind() == JsonValueKind.String
+                    && !string.IsNullOrEmpty(v.GetValue<string>()))
+                {
+                    writingEmpty = false;
+                }
+                if (!writingEmpty) continue;
+
+                if (node[obj] is not JsonObject) node[obj] = new JsonObject();
+                node[obj]![field] = JsonValue.Create(GetDiskCipher(diskRoot, obj, field));
+                changed = true;
+                System.Diagnostics.Debug.WriteLine($"[LinkerConfig] 字段 {obj}.{field} 磁盘密文解不开且内存为空，按原样保留");
+            }
+            return changed ? node.ToJsonString(JsonOptions) : json;
         }
-        catch
+        catch (Exception ex)
         {
-            return false;
+            // 这段只是补救，绝不能把一次本来写得成的保存变成失败
+            System.Diagnostics.Debug.WriteLine($"[LinkerConfig] 凭据保留检查跳过: {ex.GetType().Name}");
+            return json;
         }
+    }
+
+    private static string GetDiskCipher(JsonElement root, string obj, string field)
+    {
+        if (root.TryGetProperty(obj, out var o) && o.ValueKind == JsonValueKind.Object
+            && o.TryGetProperty(field, out var v) && v.ValueKind == JsonValueKind.String)
+            return v.GetString() ?? string.Empty;
+        return string.Empty;
     }
 
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -284,19 +319,12 @@ public class LinkerConfig
         {
             fileLock = TryAcquireFileLock(path);
 
-            // 服务侧的 TokenManager 也会整份重写：解不开旧密文而内存是空的时候落盘，
-            // 就等于把唯一还存在的凭据字节抹掉，这里挡住（返回 false，调用方按保存失败处理）
-            if (WouldWipeUndecryptable(path))
-            {
-                System.Diagnostics.Debug.WriteLine($"Config save refused: undecryptable credentials on disk, {path}");
-                return false;
-            }
-
             var dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                 Directory.CreateDirectory(dir);
 
-            var json = JsonSerializer.Serialize(this, JsonOptions);
+            // 磁盘上解不开的凭据字段按原样搬过去，其余字段照常写（见 PreserveUndecryptableFields）
+            var json = PreserveUndecryptableFields(path, JsonSerializer.Serialize(this, JsonOptions));
 
             // Atomic write: write to temp then rename
             var tempPath = path + ".tmp";
