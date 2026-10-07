@@ -45,13 +45,15 @@ public sealed class PollingScheduler : IAsyncDisposable
             _triggers[trigger.Id] = trigger;
             trigger.SensorCache = _sensorCache;  // 注入传感器缓存
             trigger.GlobalPollingInterval = _baseInterval;  // 注入全局轮询间隔（供窗口计算）
-            // 如果已经在运行，立即启动新注册的触发器
+            // 如果已经在运行（热重载），立即启动新注册的触发器
             if (_isRunning)
             {
                 try { trigger.Start(); } catch { }
             }
         }
-        EnsureTimer();
+        // 这里**不能**替调用方把调度器开起来：TriggerManager 是"先注册、再播种基线、最后 Start()"，
+        // 在这里 arm 会让调度器在基线建立之前就开始轮询，已满足的规则被当成新上升沿，
+        // 服务一起来就重发一遍动作（实测日志：调度器启动 → 规则触发 → 1.2 秒后才"按基线处理"）。
     }
 
     /// <summary>
@@ -85,6 +87,15 @@ public sealed class PollingScheduler : IAsyncDisposable
         {
             _triggers.Remove(triggerId);
         }
+    }
+
+    /// <summary>
+    /// 播种专用：清空传感器缓存。缓存只在真轮询开始时清，播种的多轮之间不清的话，
+    /// 第一遍"读不到"（NaN）会被当成读数一直复用，重读多少次都还是 NaN。
+    /// </summary>
+    internal void ResetSensorCache()
+    {
+        _sensorCache.Clear();
     }
 
     public void Start()
@@ -121,12 +132,6 @@ public sealed class PollingScheduler : IAsyncDisposable
         }
 
         _logger.Info("轮询调度器已停止");
-    }
-
-    private void EnsureTimer()
-    {
-        if (_isRunning || _disposed) return;
-        Start();
     }
 
     /// <summary>

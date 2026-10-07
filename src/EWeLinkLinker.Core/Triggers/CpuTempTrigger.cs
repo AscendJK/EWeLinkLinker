@@ -63,6 +63,7 @@ public class CpuTempTrigger : OptimizedTriggerBase
             ? SensorCache.GetOrCreate("cpu_temp", ReadCpuTemperature)
             : ReadCpuTemperature();
 
+        LastReadingAvailable = !float.IsNaN(temp);
         if (float.IsNaN(temp))
         {
             if (!_loggedWmiError)

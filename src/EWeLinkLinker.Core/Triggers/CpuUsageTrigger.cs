@@ -68,6 +68,7 @@ public class CpuUsageTrigger : OptimizedTriggerBase
             : ReadCpuUsage();
 
         // 读取失败（NaN）时不触发也不复位，保持当前状态（与温度触发器一致，安全失败）
+        LastReadingAvailable = !float.IsNaN(usage);
         if (float.IsNaN(usage)) return ValueTask.FromResult(false);
 
         // 最长粘住的计时挂在规则上（RuleTrigger），不在这里：每个条件各一个钟会让

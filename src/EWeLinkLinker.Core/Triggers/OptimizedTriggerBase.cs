@@ -45,6 +45,13 @@ public abstract class OptimizedTriggerBase : ITrigger
     public event EventHandler<TriggerStateChangedEventArgs>? StateChanged;
 
     /// <summary>
+    /// 上一次轮询是否真的拿到了传感器读数。读不到（NaN）时子类置 false，
+    /// 让启动播种知道"这个条件现在还没定论"，要换个采样窗口再读一次，
+    /// 而不是把"未知"当成"不满足"建基线。非传感器型触发器恒为 true。
+    /// </summary>
+    internal bool LastReadingAvailable { get; set; } = true;
+
+    /// <summary>
     /// 统一的轮询间隔（由 TriggerManager 控制）
     /// </summary>
     protected virtual TimeSpan PollingInterval => TimeSpan.FromSeconds(10);

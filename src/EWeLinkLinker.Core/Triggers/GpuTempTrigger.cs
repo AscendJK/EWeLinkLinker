@@ -73,6 +73,7 @@ public class GpuTempTrigger : OptimizedTriggerBase
             ? SensorCache.GetOrCreate("gpu_temp", ReadGpuTemperature)
             : ReadGpuTemperature();
 
+        LastReadingAvailable = !float.IsNaN(temp);
         if (float.IsNaN(temp)) return ValueTask.FromResult(false);
 
         // 最长粘住的计时挂在规则上（RuleTrigger），不在这里：每个条件各一个钟会让
