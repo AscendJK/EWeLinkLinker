@@ -1,3 +1,4 @@
+﻿using System.Reflection;
 using System.ServiceProcess;
 using System.Text;
 using EWeLinkLinker.Core.Cloud;
@@ -74,8 +75,8 @@ public class LinkerWindowsService : ServiceBase
         System.Diagnostics.Debug.WriteLine($"[DEBUG] EWeLink Linker Service starting...");
 
         Log("========================================");
-        Log($"EWeLink Linker Service v1.2.0");
-        Log($"Build: {GetType().Assembly.GetName().Version}");
+        Log($"EWeLink Linker Service {BuildVersionStamp()}");
+        Log($"Build: {Assembly.GetExecutingAssembly().GetName().Version} 二进制: {BinaryStamp()}");
         Log("========================================");
         Log("Service starting...");
         Log($"Config path: {_configPath}");
@@ -105,6 +106,35 @@ public class LinkerWindowsService : ServiceBase
         }
 
         Log("Service started");
+    }
+
+    /// <summary>
+    /// 真实构建标识。这里以前硬编码 "v1.2.0"：日志里 7 次启动全自称 v1.2.0，
+    /// 装的其实是 5 个不同 commit，靠这行根本看不出跑的是哪一版。
+    /// csproj 没写 Version，所以 FileVersion 恒为 1.0.0.0，能区分版本的只有
+    /// InformationalVersion（.NET 默认把 commit 拼在后面，形如 1.0.0+333d3c2…）。
+    /// </summary>
+    private static string BuildVersionStamp()
+    {
+        var asm = Assembly.GetExecutingAssembly();
+        var info = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+        return string.IsNullOrWhiteSpace(info) ? (asm.GetName().Version?.ToString() ?? "unknown") : info;
+    }
+
+    /// <summary>二进制文件时间——判断"盘上这份到底是哪次发布出来的"最直接的落点。</summary>
+    private static string BinaryStamp()
+    {
+        try
+        {
+            var loc = Assembly.GetExecutingAssembly().Location;
+            return string.IsNullOrEmpty(loc) || !File.Exists(loc)
+                ? "路径不可用"
+                : File.GetLastWriteTime(loc).ToString("yyyy-MM-dd HH:mm:ss");
+        }
+        catch
+        {
+            return "读取失败";
+        }
     }
 
     /// <summary>

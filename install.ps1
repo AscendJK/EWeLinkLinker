@@ -50,18 +50,26 @@ if (-not (Test-Path $serviceProject)) {
 }
 
 # Build and publish (unless -NoBuild specified)
+# 一次发两个：以前这里只 publish Service，ConfigApp 是另一条独立动作，
+# 于是盘上出现过 Service=一个 commit、ConfigApp=另一个 commit 的混版（两边共用 Core.dll 却版本不一致）。
 if (-not $NoBuild) {
-    Write-Host "Building Service project..." -ForegroundColor Cyan
+    $configAppProject = Join-Path $projectRoot "src\EWeLinkLinker.ConfigApp\EWeLinkLinker.ConfigApp.csproj"
+    Write-Host "Building Service + ConfigApp..." -ForegroundColor Cyan
     Push-Location $projectRoot
+
     dotnet publish $serviceProject -c Release -o publish/Service --self-contained false
-    $buildExitCode = $LASTEXITCODE
+    $serviceBuildExit = $LASTEXITCODE
+
+    dotnet publish $configAppProject -c Release -o publish/ConfigApp --self-contained false
+    $configAppBuildExit = $LASTEXITCODE
+
     Pop-Location
 
-    if ($buildExitCode -ne 0) {
-        Write-Host "ERROR: Build failed with exit code $buildExitCode" -ForegroundColor Red
+    if ($serviceBuildExit -ne 0 -or $configAppBuildExit -ne 0) {
+        Write-Host "ERROR: build failed (Service=$serviceBuildExit ConfigApp=$configAppBuildExit)" -ForegroundColor Red
         exit 1
     }
-    Write-Host "Build succeeded." -ForegroundColor Green
+    Write-Host "Build succeeded (both projects)." -ForegroundColor Green
 }
 
 # Verify exe exists
