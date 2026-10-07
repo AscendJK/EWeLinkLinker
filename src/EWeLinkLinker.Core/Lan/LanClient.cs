@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Net.NetworkInformation;
@@ -491,12 +492,25 @@ public class LanClient
         return sb.ToString();
     }
 
-    public async Task<bool> SetPowerAsync(DeviceInfo device, bool turnOn, int outlet = 0)
+    /// <summary>
+    /// 一条 LAN 命令的送达结论。分不出"没送到"和"送到了没回话"，重试就会把同一条命令发两遍。
+    /// </summary>
+    private enum SendStatus
+    {
+        /// <summary>设备确认收到（HTTP 200 且 error 为 0，或老固件 200 空 body）</summary>
+        Delivered,
+        /// <summary>明确没执行（连不上、非 2xx、设备报错）——补发是安全的</summary>
+        NotSent,
+        /// <summary>请求已经发出去但没拿到确认（超时）——补发等于把命令再执行一遍</summary>
+        Unacked,
+    }
+
+    private async Task<SendStatus> SendPowerAsync(DeviceInfo device, bool turnOn, int outlet)
     {
         if (string.IsNullOrEmpty(device.IpAddress))
         {
             _logger?.LogWarning("Device {DeviceName} has no IP address", device.Name);
-            return false;
+            return SendStatus.NotSent;
         }
 
         var state = turnOn ? "on" : "off";
@@ -533,41 +547,83 @@ public class LanClient
             // 既不重试，[AUDIT] 留痕也跟着骗人
             if (!response.IsSuccessStatusCode)
             {
-                SimpleLogger.Log($"[LAN] {device.Name} HTTP {(int)response.StatusCode} rejected: {(json.Length > 120 ? json[..120] : json)}");
-                return false;
+                SimpleLogger.Log($"[LAN] {device.Name} HTTP {(int)response.StatusCode} rejected: {Shorten(json)}");
+                return SendStatus.NotSent;
             }
 
-            // H-? 修复：区分 HTTP 路径和 Socket 路径的空响应语义。
-            // HttpClient 路径收到 HTTP 200（即使空 body）说明设备已接收请求，返回 true。
+            // 区分 HTTP 路径和 Socket 路径的空响应语义：
+            // HttpClient 路径收到 HTTP 200（即使空 body）说明设备已接收请求。
             // Socket 路径的空响应由 ReadHttpResponseAsync 返回 null 处理。
             if (string.IsNullOrEmpty(json))
-                return true; // HTTP 200 空 body = 设备老固件不返回响应体，但已执行命令
+                return SendStatus.Delivered; // 老固件不返回响应体，但命令已执行
 
             using var doc = JsonDocument.Parse(json);
-            if (doc.RootElement.TryGetProperty("error", out var error))
-                return error.GetInt32() == 0;
-            return true;
+            if (TryGetDeviceError(doc.RootElement, out var code, out var msg))
+            {
+                // eWeLink 把业务错误装在 HTTP 200 里：不记 error 和 msg 的话，
+                // 日志只有一句"失败"，分不清是密钥不对、通道号越界还是设备正忙
+                var ok = IsErrorZero(code);
+                SimpleLogger.Log($"[LAN] {device.Name} HTTP 200 error={code}" +
+                                 (ok ? "" : $" msg={Shorten(msg)}") + $" → {(ok ? "确认收到" : "设备拒绝")}");
+                return ok ? SendStatus.Delivered : SendStatus.NotSent;
+            }
+            return SendStatus.Delivered;
         }
         catch (HttpRequestException ex)
         {
+            // 连不上/连接被拒：命令根本没送到设备，走 socket 补一次是安全的
             SimpleLogger.Log($"[LAN] {device.Name} HTTP error: {ex.Message}");
             return await SendViaSocketAsync(device, requestBody);
         }
         catch (TaskCanceledException)
         {
-            // H-? 修复：HTTP 超时也走 Socket 兜底，避免设备忙碌时直接失败
-            SimpleLogger.Log($"[LAN] {device.Name} HTTP timeout, falling back to socket");
-            return await SendViaSocketAsync(device, requestBody);
+            // 超时不等于"没送到"：请求已经发出去了，设备很可能已经执行、只是没回话。
+            // 原来这里再用裸 socket 补发一次 ⇒ 同一条命令发两遍；外层 SetPowerWithRetryAsync
+            // 还会再补一遍。现在按"已发出未确认"返回，重试逻辑见到它就停手。
+            SimpleLogger.Log($"[LAN] {device.Name} HTTP 超时（{_http.Timeout.TotalSeconds:F0}s），" +
+                             "命令可能已被设备执行，不再补发 → 判定失败（未确认）");
+            return SendStatus.Unacked;
         }
         catch (Exception ex)
         {
             SimpleLogger.Log($"[LAN] {device.Name} error: {ex.Message}");
-            return false;
+            return SendStatus.NotSent;
         }
     }
 
-    private async Task<bool> SendViaSocketAsync(DeviceInfo device, object requestBody)
+    /// <summary>
+    /// 取出设备返回体里的 error 码和 msg。不同固件的 error 有给数字的、有给字符串的（"4002"），
+    /// 用 GetInt32 直接解会在字符串型上抛异常 ⇒ 被外层 catch 吞成一次普通失败，码和 msg 都丢了。
+    /// </summary>
+    private static bool TryGetDeviceError(JsonElement root, out string code, out string msg)
     {
+        code = string.Empty;
+        msg = string.Empty;
+        if (!root.TryGetProperty("error", out var error)) return false;
+
+        code = error.ValueKind switch
+        {
+            JsonValueKind.String => error.GetString() ?? string.Empty,
+            JsonValueKind.Number => error.GetRawText(),
+            _ => error.GetRawText(),
+        };
+        if (root.TryGetProperty("msg", out var m) && m.ValueKind == JsonValueKind.String)
+            msg = m.GetString() ?? string.Empty;
+        return true;
+    }
+
+    private static bool IsErrorZero(string code) =>
+        double.TryParse(code, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) && value == 0;
+
+    private static string Shorten(string? text)
+    {
+        if (string.IsNullOrEmpty(text)) return "(空)";
+        return text.Length > 120 ? text[..120] : text;
+    }
+
+    private async Task<SendStatus> SendViaSocketAsync(DeviceInfo device, object requestBody)
+    {
+        var written = false;
         try
         {
             using var client = new TcpClient();
@@ -585,10 +641,11 @@ public class LanClient
 
             var bytes = Encoding.UTF8.GetBytes(httpRequest);
             await client.GetStream().WriteAsync(bytes, cts.Token);
+            written = true;
 
-            // H-? 修复：使用 ReadHttpResponseAsync 循环读取完整响应
+            // 使用 ReadHttpResponseAsync 循环读取完整响应
             var fullResponse = await ReadHttpResponseAsync(client);
-            if (fullResponse == null) return false;
+            if (fullResponse == null) return SendStatus.NotSent;
 
             if (fullResponse.StartsWith("HTTP/1.1 200") || fullResponse.StartsWith("HTTP/1.0 200"))
             {
@@ -597,31 +654,39 @@ public class LanClient
                 {
                     var jsonBody = fullResponse[(bodyStart + 4)..].Trim();
                     // 与 HTTP 路径一致：已确认是 200，老固件不返 body，命令其实执行了
-                    if (string.IsNullOrEmpty(jsonBody)) return true;
+                    if (string.IsNullOrEmpty(jsonBody)) return SendStatus.Delivered;
                     try
                     {
                         // 与 HTTP 路径一致，用 JSON 解析判断 error 字段
                         using var doc = JsonDocument.Parse(jsonBody);
-                        if (doc.RootElement.TryGetProperty("error", out var error))
-                            return error.GetInt32() == 0;
+                        if (TryGetDeviceError(doc.RootElement, out var code, out var msg))
+                        {
+                            var ok = IsErrorZero(code);
+                            SimpleLogger.Log($"[LAN] {device.Name} socket 200 error={code}" +
+                                             (ok ? "" : $" msg={Shorten(msg)}") +
+                                             $" → {(ok ? "确认收到" : "设备拒绝")}");
+                            return ok ? SendStatus.Delivered : SendStatus.NotSent;
+                        }
                     }
                     catch (JsonException) { }
-                    return true; // 200 且无 error 字段，视为成功
+                    return SendStatus.Delivered; // 200 且无 error 字段，视为成功
                 }
-                return true;
+                return SendStatus.Delivered;
             }
 
-            return false;
+            return SendStatus.NotSent;
         }
         catch (OperationCanceledException)
         {
-            SimpleLogger.Log($"[LAN] {device.Name} socket timeout");
-            return false;
+            // 写出去之后才超时 = 设备可能已经在执行，和 HTTP 超时同一处理
+            SimpleLogger.Log($"[LAN] {device.Name} socket timeout" +
+                             (written ? "（命令已写出，未确认，不再补发）" : "（连接阶段，命令未发出）"));
+            return written ? SendStatus.Unacked : SendStatus.NotSent;
         }
         catch (Exception ex)
         {
             SimpleLogger.Log($"[LAN] {device.Name} socket error: {ex.Message}");
-            return false;
+            return written ? SendStatus.Unacked : SendStatus.NotSent;
         }
     }
 
@@ -629,7 +694,16 @@ public class LanClient
     {
         for (int i = 0; i <= maxRetries; i++)
         {
-            if (await SetPowerAsync(device, turnOn, outlet)) return true;
+            var status = await SendPowerAsync(device, turnOn, outlet);
+            if (status == SendStatus.Delivered) return true;
+
+            if (status == SendStatus.Unacked)
+            {
+                // 命令已经送到设备门口、只是没等到回话：再发一遍就是把同一条开/关执行两次。
+                // 这里停手，按失败上报（[AUDIT] 会留 fail），让下一轮判定或人工去纠偏。
+                SimpleLogger.Log($"[LAN] {device.Name} 已发出未确认，跳过重试");
+                return false;
+            }
             if (i < maxRetries) await Task.Delay(500);
         }
         return false;

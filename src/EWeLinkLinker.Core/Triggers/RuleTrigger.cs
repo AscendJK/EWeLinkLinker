@@ -34,6 +34,12 @@ public sealed class RuleTrigger : IDisposable, IPostPollCallback
     /// <summary>强制重判要两拍：这一拍记下降沿，下一拍才允许升回去发动作。</summary>
     private bool _reArmPending;
 
+    /// <summary>
+    /// 这条规则当前是否有一批动作正在执行（0/1）。上一批还没跑完就再发一批，
+    /// 两条执行队列会交错写同一个插座，后发的那批可能把前一批刚设好的状态改回去。
+    /// </summary>
+    private int _actionInFlight;
+
     public RuleTrigger(LinkerRule rule, LinkerService linkerService, ServiceLogger logger, PollingScheduler scheduler)
     {
         _rule = rule;
@@ -106,20 +112,34 @@ public sealed class RuleTrigger : IDisposable, IPostPollCallback
                     return $"{c.Type}={c.Parameter}({state})";
                 }));
 
-                _logger.LogRuleTriggered(_rule.Name, reason);
-                _actionStampedUtc = nowUtc;
-
-                _ = Task.Run(async () =>
+                // 上一批动作还在跑就再发一批：两条队列会交错写同一个插座，后发的那批
+                // 可能把前一批刚设好的状态改回去（口径 A：跳过这一发并记日志）。
+                // 这一发不会补回来——最长粘住计时还没盖章，最多 30 分钟的强制重判会再造一次上升沿。
+                if (Interlocked.CompareExchange(ref _actionInFlight, 1, 0) != 0)
                 {
-                    try
+                    _logger.Warn($"规则 [{_rule.Name}] 已有动作在飞，本次跳过（条件: {reason}）");
+                }
+                else
+                {
+                    _logger.LogRuleTriggered(_rule.Name, reason);
+                    _actionStampedUtc = nowUtc;
+
+                    _ = Task.Run(async () =>
                     {
-                        await _linkerService.ExecuteRuleAsync(_rule).ConfigureAwait(false);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.Error($"规则 [{_rule.Name}] 执行失败", ex);
-                    }
-                });
+                        try
+                        {
+                            await _linkerService.ExecuteRuleAsync(_rule).ConfigureAwait(false);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.Error($"规则 [{_rule.Name}] 执行失败", ex);
+                        }
+                        finally
+                        {
+                            Interlocked.Exchange(ref _actionInFlight, 0);
+                        }
+                    });
+                }
             }
 
             _previousCompositeResult = currentResult;
