@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -46,6 +46,7 @@ public partial class MainWindow : Window, IDisposable
 
     private bool _isLoggingIn;
     private bool _isRefreshing;
+    private readonly Dictionary<string, DeviceCardVisual> _deviceCards = new();
     private bool _hasAutoDiscovered;
     private DateTime _lastAutoReloginUtc = DateTime.MinValue;
     private static readonly TimeSpan AutoReloginCooldown = TimeSpan.FromMinutes(1);
@@ -81,12 +82,8 @@ public partial class MainWindow : Window, IDisposable
         RulesItemsControl.ItemsSource = _rules;
         LoadConfig();
 
-        // 强制刷新 UI
-        Dispatcher.InvokeAsync(() =>
-        {
-            RulesItemsControl.Items.Refresh();
-            Log("[UI] 已刷新规则列表");
-        }, System.Windows.Threading.DispatcherPriority.Render);
+        // 这里原来有一次 RulesItemsControl.Items.Refresh()（"强制刷新 UI"），实测同步占 UI 线程 49.9ms，
+        // 而 ObservableCollection 的 Add 通知本身已经够让列表出画面，所以直接去掉。
 
         // Service status polling - 修复：使用安全的事件处理
         _serviceStatusTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
@@ -202,7 +199,7 @@ public partial class MainWindow : Window, IDisposable
             }
             Log($"[加载] 最终规则数: {_rules.Count}");
 
-            RebuildDeviceCards();
+            SyncDeviceCards();
         }
         catch (Exception ex)
         {
@@ -611,14 +608,48 @@ public partial class MainWindow : Window, IDisposable
 
     // ─── Device Cards ──────────────────────────────────
 
-    private void RebuildDeviceCards()
+    private void SyncDeviceCards()
     {
-        DeviceCardsPanel.Children.Clear();
+        // 就地更新，不推倒重建。原来每次刷新都 Children.Clear()+new，代价有两块：
+        // 一是滚动位置和悬停态被丢掉；二是卡片里"真实MAC"输入框只在失焦时才回写模型，
+        // 你正打到一半、刷新落地的话整框被按旧值重建，输入直接没了。
+        var alive = new HashSet<string>();
+
         foreach (var device in _allDevices)
         {
-            DeviceCardsPanel.Children.Add(BuildDeviceCard(device));
+            alive.Add(device.DeviceId);
+            if (_deviceCards.TryGetValue(device.DeviceId, out var visual))
+            {
+                UpdateDeviceCard(visual, device);
+            }
+            else
+            {
+                visual = BuildDeviceCard(device);
+                _deviceCards[device.DeviceId] = visual;
+                DeviceCardsPanel.Children.Add(visual.Card);
+            }
         }
+
+        foreach (var gone in _deviceCards.Keys.Where(id => !alive.Contains(id)).ToArray())
+        {
+            DeviceCardsPanel.Children.Remove(_deviceCards[gone].Card);
+            _deviceCards.Remove(gone);
+        }
+
         DeviceCountText.Text = _allDevices.Count > 0 ? $"({_allDevices.Count} 台设备)" : string.Empty;
+    }
+
+    /// <summary>一台设备卡片的可变动部分，按 DeviceId 缓存下来，刷新时就地改而不是重建。</summary>
+    private sealed class DeviceCardVisual
+    {
+        public Border Card = null!;
+        public TextBlock NameText = null!;
+        public System.Windows.Shapes.Ellipse Dot = null!;
+        public TextBlock IpText = null!;
+        public TextBlock CloudMacText = null!;
+        public TextBox MacBox = null!;
+        public WrapPanel ChannelPanel = null!;
+        public int ChannelCountBuilt = -1;
     }
 
     /// <summary>
@@ -672,114 +703,113 @@ public partial class MainWindow : Window, IDisposable
         }
     }
 
-    private Border BuildDeviceCard(DeviceInfo device)
+    private DeviceCardVisual BuildDeviceCard(DeviceInfo device)
     {
-        var card = new Border { Style = (Style)FindResource("DeviceCardStyle") };
-        var panel = new StackPanel();
-
-        // Header: name + online status
-        var header = new DockPanel { Margin = new Thickness(0, 0, 0, 8) };
-        var nameText = new TextBlock
+        var v = new DeviceCardVisual
         {
-            Text = device.Name,
-            FontWeight = FontWeights.SemiBold,
-            FontSize = 14,
-            Foreground = (Brush)FindResource("TextPrimaryBrush")
+            Card = new Border { Style = (Style)FindResource("DeviceCardTileStyle") },
+            NameText = new TextBlock { FontWeight = FontWeights.SemiBold, FontSize = 14, Foreground = (Brush)FindResource("TextPrimaryBrush") },
+            Dot = new System.Windows.Shapes.Ellipse { Width = 8, Height = 8, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 0, 0) },
+            IpText = new TextBlock { FontSize = 11, Foreground = (Brush)FindResource("TextSecondaryBrush"), Margin = new Thickness(0, 0, 0, 10) },
+            CloudMacText = new TextBlock { FontSize = 11, Foreground = (Brush)FindResource("TextSecondaryBrush"), VerticalAlignment = VerticalAlignment.Center },
+            MacBox = new TextBox { FontSize = 11, Style = (Style)FindResource("ModernTextBox"), Margin = new Thickness(8, 0, 0, 0) },
+            ChannelPanel = new WrapPanel()
         };
-        DockPanel.SetDock(nameText, Dock.Left);
-        header.Children.Add(nameText);
 
-        var dot = new System.Windows.Shapes.Ellipse
-        {
-            Width = 8, Height = 8,
-            Fill = device.IsOnline ? (Brush)FindResource("StatusOnlineBrush") : (Brush)FindResource("StatusOfflineBrush"),
-            VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(8, 0, 0, 0)
-        };
-        DockPanel.SetDock(dot, Dock.Right);
-        header.Children.Add(dot);
-        panel.Children.Add(header);
+        var secondary = (Brush)FindResource("TextSecondaryBrush");
 
-        // IP
-        panel.Children.Add(new TextBlock
-        {
-            Text = string.IsNullOrEmpty(device.IpAddress) ? "(未连接)" : device.IpAddress,
-            FontSize = 11,
-            Foreground = (Brush)FindResource("TextSecondaryBrush"),
-            Margin = new Thickness(0, 0, 0, 10)
-        });
+        // LastChildFill=false：卡片定宽后若让最后一个孩子填充，8px 的状态点会贴着名字而不是贴右边缘
+        var header = new DockPanel { Margin = new Thickness(0, 0, 0, 8), LastChildFill = false };
+        DockPanel.SetDock(v.NameText, Dock.Left);
+        DockPanel.SetDock(v.Dot, Dock.Right);
+        header.Children.Add(v.NameText);
+        header.Children.Add(v.Dot);
 
-        // Channel buttons
-        var channelPanel = new WrapPanel();
-        for (int i = 0; i < device.ChannelCount; i++)
-        {
-            var outlet = i;
-            var isOn = i < device.ChannelStates.Count && device.ChannelStates[i] == "on";
-            var btn = new ToggleButton
-            {
-                Content = $"通道{outlet}",
-                Style = (Style)FindResource("ChannelButton"),
-                IsChecked = isOn,
-                Tag = (Device: device, Outlet: outlet)
-            };
-            btn.Click += async (s, e) => await ToggleChannel(device, outlet, btn);
-            channelPanel.Children.Add(btn);
-        }
-        panel.Children.Add(channelPanel);
+        var cloudRow = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
+        var cloudLabel = new TextBlock { Text = "云端MAC:", FontSize = 11, Foreground = secondary, VerticalAlignment = VerticalAlignment.Center, Width = 55 };
+        DockPanel.SetDock(cloudLabel, Dock.Left);
+        cloudRow.Children.Add(cloudLabel);
+        cloudRow.Children.Add(v.CloudMacText);
 
-        // MAC 地址区域
+        var realRow = new DockPanel();
+        var realLabel = new TextBlock { Text = "真实MAC:", FontSize = 11, Foreground = secondary, VerticalAlignment = VerticalAlignment.Center, Width = 55 };
+        DockPanel.SetDock(realLabel, Dock.Left);
+        realRow.Children.Add(realLabel);
+        realRow.Children.Add(v.MacBox);
+
         var macPanel = new StackPanel { Margin = new Thickness(0, 12, 0, 0) };
+        macPanel.Children.Add(cloudRow);
+        macPanel.Children.Add(realRow);
 
-        // 云端 MAC（只读）
-        var cloudMacPanel = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
-        cloudMacPanel.Children.Add(new TextBlock
-        {
-            Text = "云端MAC:",
-            FontSize = 11,
-            Foreground = (Brush)FindResource("TextSecondaryBrush"),
-            VerticalAlignment = VerticalAlignment.Center,
-            Width = 55
-        });
-        cloudMacPanel.Children.Add(new TextBlock
-        {
-            Text = device.CloudMacDisplay,
-            FontSize = 11,
-            Foreground = (Brush)FindResource("TextSecondaryBrush"),
-            VerticalAlignment = VerticalAlignment.Center
-        });
-        macPanel.Children.Add(cloudMacPanel);
-
-        // 真实 MAC（可编辑）
-        var realMacPanel = new DockPanel();
-        realMacPanel.Children.Add(new TextBlock
-        {
-            Text = "真实MAC:",
-            FontSize = 11,
-            Foreground = (Brush)FindResource("TextSecondaryBrush"),
-            VerticalAlignment = VerticalAlignment.Center,
-            Width = 55
-        });
-        var macTextBox = new TextBox
-        {
-            Text = device.RealMacAddress,
-            FontSize = 11,
-            Style = (Style)FindResource("ModernTextBox"),
-            Margin = new Thickness(8, 0, 0, 0)
-        };
-        macTextBox.LostFocus += (s, e) =>
-        {
-            // 自动格式化 MAC 地址
-            var formatted = DeviceInfo.AutoFormatMac(macTextBox.Text);
-            device.RealMacAddress = formatted;
-            macTextBox.Text = formatted;
-        };
-        realMacPanel.Children.Add(macTextBox);
-        macPanel.Children.Add(realMacPanel);
-
+        // MAC 两行钉在卡片底部、通道区吃掉中间：同一行里 1 路和 8 路的 MAC 行才对得齐。
+        // DockPanel 的默认 Dock 是 Left，标题/IP 必须显式写 Top，否则整张卡横着排。
+        var panel = new DockPanel();
+        DockPanel.SetDock(header, Dock.Top);
+        DockPanel.SetDock(v.IpText, Dock.Top);
+        DockPanel.SetDock(macPanel, Dock.Bottom);
+        panel.Children.Add(header);
+        panel.Children.Add(v.IpText);
         panel.Children.Add(macPanel);
+        panel.Children.Add(v.ChannelPanel);
+        v.Card.Child = panel;
 
-        card.Child = panel;
-        return card;
+        // 失焦时格式化并写回"当前那一份"设备对象：云端刷新可能换成新实例，
+        // 抓住建卡时的对象就会把 MAC 写进一个孤儿。
+        var deviceId = device.DeviceId;
+        v.MacBox.LostFocus += (s, e) =>
+        {
+            var formatted = DeviceInfo.AutoFormatMac(v.MacBox.Text);
+            v.MacBox.Text = formatted;
+            (_allDevices.FirstOrDefault(d => d.DeviceId == deviceId) ?? device).RealMacAddress = formatted;
+        };
+
+        UpdateDeviceCard(v, device, forceChannels: true);
+        return v;
+    }
+
+    private void UpdateDeviceCard(DeviceCardVisual v, DeviceInfo device) => UpdateDeviceCard(v, device, forceChannels: false);
+
+    private void UpdateDeviceCard(DeviceCardVisual v, DeviceInfo device, bool forceChannels)
+    {
+        v.NameText.Text = device.Name;
+        v.Dot.Fill = device.IsOnline ? (Brush)FindResource("StatusOnlineBrush") : (Brush)FindResource("StatusOfflineBrush");
+        v.IpText.Text = string.IsNullOrEmpty(device.IpAddress) ? "(未连接)" : device.IpAddress;
+        v.CloudMacText.Text = device.CloudMacDisplay;
+
+        // 他正在这一格里打字时不要用旧值覆盖——这就是原来"刷新丢掉半个 MAC"的地方
+        if (!v.MacBox.IsKeyboardFocusWithin)
+            v.MacBox.Text = device.RealMacAddress;
+
+        if (forceChannels || v.ChannelCountBuilt != device.ChannelCount)
+        {
+            v.ChannelPanel.Children.Clear();
+            for (int i = 0; i < device.ChannelCount; i++)
+            {
+                var outlet = i;
+                var btn = new ToggleButton
+                {
+                    Content = $"通道{outlet}",
+                    Style = (Style)FindResource("ChannelButton"),
+                    Tag = (Device: device, Outlet: outlet)
+                };
+                btn.Click += async (s, e) =>
+                {
+                    var live = _allDevices.FirstOrDefault(d => d.DeviceId == device.DeviceId) ?? device;
+                    await ToggleChannel(live, outlet, btn);
+                };
+                v.ChannelPanel.Children.Add(btn);
+            }
+            v.ChannelCountBuilt = device.ChannelCount;
+        }
+
+        for (int i = 0; i < v.ChannelPanel.Children.Count; i++)
+        {
+            if (v.ChannelPanel.Children[i] is ToggleButton tb)
+            {
+                var isOn = i < device.ChannelStates.Count && device.ChannelStates[i] == "on";
+                if (tb.IsChecked != isOn) tb.IsChecked = isOn;
+            }
+        }
     }
 
     private async Task ToggleChannel(DeviceInfo device, int outlet, ToggleButton btn)
@@ -1864,6 +1894,7 @@ public partial class MainWindow : Window, IDisposable
         if (_isLoggingIn) return;
         _isLoggingIn = true;
         LoginButton.IsEnabled = false;
+        LoginButton.Content = "登录中…";
 
         try
         {
@@ -1915,7 +1946,7 @@ public partial class MainWindow : Window, IDisposable
             // 设备发现完成后，保存完整配置（包含 Token + 设备 + IP）
             var savedOutcome = SaveConfig();
 
-            RebuildDeviceCards();
+            SyncDeviceCards();
             Title = "EWeLink Linker";
 
             var devicesWithIp = _allDevices.Count(d => !string.IsNullOrEmpty(d.IpAddress));
@@ -1941,6 +1972,7 @@ public partial class MainWindow : Window, IDisposable
         {
             _isLoggingIn = false;
             LoginButton.IsEnabled = true;
+            LoginButton.Content = "登录获取设备";
         }
     }
 
@@ -1959,6 +1991,9 @@ public partial class MainWindow : Window, IDisposable
     {
         if (_isRefreshing || _allDevices.Count == 0) return;
         _isRefreshing = true;
+        RefreshIPBtn.Content = "刷新IP中…";
+        RefreshIPBtn.IsEnabled = false;
+        RefreshStateBtn.IsEnabled = false;
 
         try
         {
@@ -1974,7 +2009,7 @@ public partial class MainWindow : Window, IDisposable
             // Bug 修复：恢复动作的 DeviceId
             RestoreActionDeviceIds(savedActionDeviceIds);
 
-            RebuildDeviceCards();
+            SyncDeviceCards();
             var ipSave = SaveConfig();
             Title = "EWeLink Linker";
             MessageBox.Show(ipSave == SaveOutcome.Aborted
@@ -1991,6 +2026,10 @@ public partial class MainWindow : Window, IDisposable
         finally
         {
             _isRefreshing = false;
+            RefreshIPBtn.IsEnabled = true;
+            RefreshIPBtn.Content = "刷新IP";
+            RefreshStateBtn.IsEnabled = true;
+            RefreshStateBtn.Content = "刷新状态";
         }
     }
 
@@ -1998,6 +2037,9 @@ public partial class MainWindow : Window, IDisposable
     {
         if (_isRefreshing || _allDevices.Count == 0) return;
         _isRefreshing = true;
+        RefreshStateBtn.Content = "刷新状态中…";
+        RefreshStateBtn.IsEnabled = false;
+        RefreshIPBtn.IsEnabled = false;
         var renewedByRelogin = false;
 
         try
@@ -2086,7 +2128,7 @@ public partial class MainWindow : Window, IDisposable
                 return;
             }
 
-            RebuildDeviceCards();
+            SyncDeviceCards();
             // Bug 修复：刷新状态后保存配置，防止崩溃后丢失
             var stateSave = SaveConfig();
             Title = "EWeLink Linker";
@@ -2105,6 +2147,10 @@ public partial class MainWindow : Window, IDisposable
         finally
         {
             _isRefreshing = false;
+            RefreshIPBtn.IsEnabled = true;
+            RefreshIPBtn.Content = "刷新IP";
+            RefreshStateBtn.IsEnabled = true;
+            RefreshStateBtn.Content = "刷新状态";
         }
     }
 
@@ -2193,7 +2239,7 @@ public partial class MainWindow : Window, IDisposable
             if (!_disposed)
             {
                 // 只刷新 UI，不清除集合（避免 ComboBox 失去选中项）
-                await Dispatcher.InvokeAsync(RebuildDeviceCards);
+                await Dispatcher.InvokeAsync(SyncDeviceCards);
                 // 只在真发现了新 IP 时才写盘：那几台只能走云端的设备永远没 IP，
                 // 无条件保存会让"打开工具"每次都改一次配置文件
                 if (_allDevices.Count(d => !string.IsNullOrEmpty(d.IpAddress)) > withIpBefore)
