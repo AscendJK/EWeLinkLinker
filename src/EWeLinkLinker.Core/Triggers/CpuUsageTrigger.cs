@@ -35,7 +35,7 @@ public class CpuUsageTrigger : OptimizedTriggerBase
         _releaseBand = config.ReleaseBand;
         _comparison = config.Comparison;
 
-        if (!float.TryParse(config.Parameter, out _))
+        if (!ComparisonHelper.TryParseNumber(config.Parameter, out _))
             throw new ArgumentException("使用率阈值必须为数字");
 
         if (!ComparisonHelper.ValidateRelease(config.Parameter, _releaseBand, _comparison, out var releaseError))
@@ -51,7 +51,7 @@ public class CpuUsageTrigger : OptimizedTriggerBase
             errorMessage = "使用率阈值不能为空";
             return false;
         }
-        if (!float.TryParse(parameter, out var usage) || usage < 0 || usage > 100)
+        if (!ComparisonHelper.TryParseNumber(parameter, out var usage) || usage < 0 || usage > 100)
         {
             errorMessage = "使用率阈值必须为 0-100 之间的数字";
             return false;

@@ -54,7 +54,7 @@ public sealed class ServiceLogger : IDisposable
                 .Where(f =>
                 {
                     var m = Regex.Match(Path.GetFileName(f), @"\d{4}-\d{2}-\d{2}");
-                    return m.Success && DateTime.TryParseExact(m.Value, "yyyy-MM-dd", null,
+                    return m.Success && DateTime.TryParseExact(m.Value, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture,
                         System.Globalization.DateTimeStyles.None, out var date) && date < cutoff;
                 });
             foreach (var file in oldFiles)

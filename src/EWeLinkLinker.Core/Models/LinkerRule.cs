@@ -179,8 +179,8 @@ public partial class RuleCondition : ObservableObject
     [System.Text.Json.Serialization.JsonIgnore]
     public int NumericValue
     {
-        get => int.TryParse(Parameter, out var val) ? val : 0;
-        set => Parameter = value.ToString();
+        get => Triggers.ComparisonHelper.TryParseInt(Parameter, out var val) ? val : 0;
+        set => Parameter = value.ToString(System.Globalization.CultureInfo.InvariantCulture);
     }
 
     // 辅助属性（用于 UI 绑定，不序列化）

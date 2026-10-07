@@ -936,11 +936,16 @@ public partial class MainWindow : Window, IDisposable
     {
         if (sender is TextBox textBox && textBox.DataContext is RuleCondition condition)
         {
-            // 尝试解析数字
-            if (int.TryParse(textBox.Text, out var value))
+            // 尝试解析数字（按不变文化：跟着系统区域走的话 "2,5" 会被当成千分位读成 25）
+            if (int.TryParse(textBox.Text, System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out var value))
             {
-                condition.Parameter = value.ToString();
+                condition.Parameter = value.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 Log($"数值条件更新: {condition.Parameter}");
+            }
+            else
+            {
+                Log($"[输入] \"{textBox.Text}\" 不是整数，这一条没写进规则（{ComparisonHelper.NumberFormatHint(textBox.Text)}）");
             }
         }
     }
@@ -1048,6 +1053,9 @@ public partial class MainWindow : Window, IDisposable
     {
         try
         {
+            if (!ComparisonHelper.TryParseNumber(thresholdStr, out var thresholdValue))
+                return $"阈值 \"{thresholdStr}\" 不是数字{ComparisonHelper.NumberFormatHint(thresholdStr)}";
+
             using var searcher = new System.Management.ManagementObjectSearcher(
                 @"root\WMI", "SELECT * FROM MSAcpi_ThermalZoneTemperature");
 
@@ -1059,9 +1067,8 @@ public partial class MainWindow : Window, IDisposable
                     var tempC = (tempK - 2732) / 10.0f;
                     if (tempC > 0 && tempC < 150)
                     {
-                        var threshold = float.Parse(thresholdStr);
-                        var status = tempC >= threshold ? "✓ 超过阈值" : "✗ 未超过";
-                        return $"CPU 温度: {tempC:F1}°C\n阈值: {comparisonText} {threshold}°C\n状态: {status}";
+                        var status = tempC >= thresholdValue ? "✓ 超过阈值" : "✗ 未超过";
+                        return $"CPU 温度: {tempC:F1}°C\n阈值: {comparisonText} {thresholdValue}°C\n状态: {status}";
                     }
                 }
             }
@@ -1078,6 +1085,9 @@ public partial class MainWindow : Window, IDisposable
         LibreHardwareMonitor.Hardware.Computer? computer = null;
         try
         {
+            if (!ComparisonHelper.TryParseNumber(thresholdStr, out var thresholdValue))
+                return $"阈值 \"{thresholdStr}\" 不是数字{ComparisonHelper.NumberFormatHint(thresholdStr)}";
+
             computer = new LibreHardwareMonitor.Hardware.Computer
             {
                 IsGpuEnabled = true
@@ -1097,9 +1107,8 @@ public partial class MainWindow : Window, IDisposable
                         if (sensor.SensorType == LibreHardwareMonitor.Hardware.SensorType.Temperature && sensor.Value.HasValue)
                         {
                             var temp = sensor.Value.Value;
-                            var threshold = float.Parse(thresholdStr);
-                            var status = temp >= threshold ? "✓ 超过阈值" : "✗ 未超过";
-                            return $"GPU: {hardware.Name}\nGPU 温度: {temp:F1}°C\n阈值: {comparisonText} {threshold}°C\n状态: {status}";
+                            var status = temp >= thresholdValue ? "✓ 超过阈值" : "✗ 未超过";
+                            return $"GPU: {hardware.Name}\nGPU 温度: {temp:F1}°C\n阈值: {comparisonText} {thresholdValue}°C\n状态: {status}";
                         }
                     }
                 }
@@ -1119,14 +1128,15 @@ public partial class MainWindow : Window, IDisposable
 
     private static async Task<string> GetCpuUsageInfoAsync(string thresholdStr, string comparisonText)
     {
+        if (!ComparisonHelper.TryParseNumber(thresholdStr, out var thresholdValue))
+            return $"阈值 \"{thresholdStr}\" 不是数字{ComparisonHelper.NumberFormatHint(thresholdStr)}";
         try
         {
             // 在后台线程执行，避免 UI 卡顿（采样约 900ms）
             var usage = await Task.Run(() => CpuUsageHelper.GetCpuUsage(sampleCount: 3, sampleIntervalMs: 300));
 
-            var threshold = float.Parse(thresholdStr);
-            var status = usage >= threshold ? "✓ 超过阈值" : "✗ 未超过";
-            return $"CPU 使用率: {usage:F1}%\n阈值: {comparisonText} {threshold}%\n状态: {status}";
+            var status = usage >= thresholdValue ? "✓ 超过阈值" : "✗ 未超过";
+            return $"CPU 使用率: {usage:F1}%\n阈值: {comparisonText} {thresholdValue}%\n状态: {status}";
         }
         catch (Exception ex)
         {
@@ -1137,7 +1147,7 @@ public partial class MainWindow : Window, IDisposable
     private static string GetTimeInfo(string targetTime)
     {
         var now = DateTime.Now;
-        if (TimeSpan.TryParse(targetTime, out var target))
+        if (TimeSpan.TryParse(targetTime, System.Globalization.CultureInfo.InvariantCulture, out var target))
         {
             var todayTarget = now.Date + target;
             var diff = now - todayTarget;

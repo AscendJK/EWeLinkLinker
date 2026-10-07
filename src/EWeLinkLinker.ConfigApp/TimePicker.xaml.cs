@@ -57,7 +57,7 @@ public partial class TimePicker : UserControl
         HoursCombo.SelectionChanged -= OnComboChanged;
         MinutesCombo.SelectionChanged -= OnComboChanged;
 
-        if (TimeSpan.TryParse(time, out var ts))
+        if (TimeSpan.TryParse(time, System.Globalization.CultureInfo.InvariantCulture, out var ts))
         {
             HoursCombo.SelectedItem = ts.Hours.ToString("D2");
             MinutesCombo.SelectedItem = ts.Minutes.ToString("D2");

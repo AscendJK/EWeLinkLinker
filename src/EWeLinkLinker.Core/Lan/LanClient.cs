@@ -461,7 +461,7 @@ public class LanClient
                     var trimmed = line.Trim();
                     if (trimmed.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
                     {
-                        int.TryParse(trimmed["Content-Length:".Length..].Trim(), out contentLength);
+                        Triggers.ComparisonHelper.TryParseInt(trimmed["Content-Length:".Length..].Trim(), out contentLength);
                     }
                 }
             }

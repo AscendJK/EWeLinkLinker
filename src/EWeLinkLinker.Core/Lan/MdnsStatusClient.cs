@@ -285,7 +285,7 @@ public class MdnsStatusClient
         var channels = ReadSwitches(plain);
         if (channels.Count == 0) return;
 
-        int seq = kv.TryGetValue("seq", out var seqText) && int.TryParse(seqText, out var parsedSeq) ? parsedSeq : 0;
+        int seq = kv.TryGetValue("seq", out var seqText) && Triggers.ComparisonHelper.TryParseInt(seqText, out var parsedSeq) ? parsedSeq : 0;
         var status = new LanDeviceStatus(deviceId, channels, seq, sourceIp);
         // TXT 的主名必须是 _ewelink 服务下的实例名；别的服务（_http、_printer）的 TXT 里
         // 恰好也有 id=/data1= 时不该被当成插座状态，但它仍进兜底那一摞，不至于把真状态说成"没人应答"。

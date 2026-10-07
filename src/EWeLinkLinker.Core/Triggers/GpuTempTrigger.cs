@@ -41,7 +41,7 @@ public class GpuTempTrigger : OptimizedTriggerBase
         _releaseBand = config.ReleaseBand;
         _comparison = config.Comparison;
 
-        if (!float.TryParse(config.Parameter, out _))
+        if (!ComparisonHelper.TryParseNumber(config.Parameter, out _))
             throw new ArgumentException("温度阈值必须为数字");
 
         if (!ComparisonHelper.ValidateRelease(config.Parameter, _releaseBand, _comparison, out var releaseError))
@@ -57,7 +57,7 @@ public class GpuTempTrigger : OptimizedTriggerBase
             errorMessage = "温度阈值不能为空";
             return false;
         }
-        if (!float.TryParse(parameter, out var temp) || temp < 0)
+        if (!ComparisonHelper.TryParseNumber(parameter, out var temp) || temp < 0)
         {
             errorMessage = "温度阈值必须为大于等于 0 的数字";
             return false;

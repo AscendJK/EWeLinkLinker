@@ -23,7 +23,9 @@ public class IntervalTrigger : OptimizedTriggerBase
     {
         if (!ValidateParameter(config.Parameter, out var error))
             throw new ArgumentException(error);
-        _intervalMinutes = int.Parse(config.Parameter!);
+        // 不接系统区域：同一个 "1,5" 在中文区域会被 int.Parse 当成 15，间隔直接差十倍
+        if (!ComparisonHelper.TryParseInt(config.Parameter, out _intervalMinutes))
+            throw new ArgumentException($"间隔必须是整数分钟（当前填的是 {config.Parameter}）{ComparisonHelper.NumberFormatHint(config.Parameter)}");
         // H-18 修复：不在构造函数中设置 _lastTriggered，改为 OnStart 中设置
         // 这样首次触发时间从 Start 时刻算起，而非构造时刻
         _lastTriggered = DateTime.MinValue;
@@ -43,9 +45,9 @@ public class IntervalTrigger : OptimizedTriggerBase
             errorMessage = "间隔不能为空";
             return false;
         }
-        if (!int.TryParse(parameter, out var minutes) || minutes < 1)
+        if (!ComparisonHelper.TryParseInt(parameter, out var minutes) || minutes < 1)
         {
-            errorMessage = "间隔必须为大于等于 1 的整数（分钟）";
+            errorMessage = $"间隔必须为大于等于 1 的整数（分钟，当前填的是 {parameter}）{ComparisonHelper.NumberFormatHint(parameter)}";
             return false;
         }
         errorMessage = null;

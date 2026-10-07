@@ -1,3 +1,4 @@
+using System.Globalization;
 using EWeLinkLinker.Core.Models;
 
 namespace EWeLinkLinker.Core.Triggers;
@@ -8,6 +9,22 @@ namespace EWeLinkLinker.Core.Triggers;
 // 需要被 ConfigApp 调用（保存前校验解除线方向），所以是 public 而非 internal
 public static class ComparisonHelper
 {
+    /// <summary>
+    /// 配置和协议里的数字一律按不变文化解析。跟着系统区域走有两个坑：
+    /// 同一份 linker.json 换台机器阈值就变；中文/英文区域把逗号当千分位，
+    /// "2,5" 会被悄悄解析成 25 ⇒ 阈值差十倍。宁可判"不是数字"，让上层把问题报出来。
+    /// </summary>
+    public static bool TryParseNumber(string? text, out float value) =>
+        float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
+
+    public static bool TryParseInt(string? text, out int value) =>
+        int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
+
+    /// <summary>填了逗号时给一句人话：只说"不是数字"，用户不知道该改成什么。</summary>
+    public static string NumberFormatHint(string? text) =>
+        !string.IsNullOrEmpty(text) && text.Contains(',')
+            ? "（小数点请用英文句点，例如 62.5；这里的逗号会被当成千分位或范围分隔符）"
+            : "";
     /// <summary>
     /// 根据比较运算符判断值是否满足条件
     /// </summary>
@@ -84,7 +101,7 @@ public static class ComparisonHelper
     {
         // 读数失效时不额外锁住状态，交由调用方的安全失败处理
         if (float.IsNaN(actualValue)) return true;
-        if (!float.TryParse(releaseParameter, out var release)) return true;
+        if (!TryParseNumber(releaseParameter, out var release)) return true;
 
         return comparison switch
         {
@@ -114,8 +131,8 @@ public static class ComparisonHelper
     public static string ResolveRelease(string triggerParameter, string? releaseBand, ComparisonOperator comparison)
     {
         if (string.IsNullOrWhiteSpace(releaseBand)) return "";
-        if (!float.TryParse(triggerParameter, out var trigger)) return "";
-        if (!float.TryParse(releaseBand, out var band) || band <= 0) return "";
+        if (!TryParseNumber(triggerParameter, out var trigger)) return "";
+        if (!TryParseNumber(releaseBand, out var band) || band <= 0) return "";
 
         return comparison switch
         {
@@ -137,14 +154,14 @@ public static class ComparisonHelper
         errorMessage = null;
         if (string.IsNullOrWhiteSpace(releaseBand)) return true;
 
-        if (!float.TryParse(triggerParameter, out _))
+        if (!TryParseNumber(triggerParameter, out _))
         {
             errorMessage = "触发阈值不是数字，无法计算解除线";
             return false;
         }
-        if (!float.TryParse(releaseBand, out var band))
+        if (!TryParseNumber(releaseBand, out var band))
         {
-            errorMessage = $"解除带宽必须是数字（当前填的是 {releaseBand}）";
+            errorMessage = $"解除带宽必须是数字（当前填的是 {releaseBand}）{NumberFormatHint(releaseBand)}";
             return false;
         }
         if (band <= 0)
@@ -164,8 +181,7 @@ public static class ComparisonHelper
 
     private static float ParseSingle(string parameter)
     {
-        // 解析失败返回 NaN：所有比较分支与 NaN 比较均为 false（安全失败），
-        // 避免坏参数变成阈值 0 导致规则恒满足
-        return float.TryParse(parameter, out var value) ? value : float.NaN;
+        // 解析失败返回 NaN：所有比较分支与 NaN 比较都是 false（安全失败），避免坏参数变成阈值 0
+        return TryParseNumber(parameter, out var value) ? value : float.NaN;
     }
 }

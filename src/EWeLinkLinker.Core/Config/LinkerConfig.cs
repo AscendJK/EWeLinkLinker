@@ -218,8 +218,8 @@ public class LinkerConfig
                 var legacy = c.LegacyReleaseParameter;
                 c.LegacyReleaseParameter = null;
                 if (string.IsNullOrWhiteSpace(legacy) || !string.IsNullOrWhiteSpace(c.ReleaseBand)) continue;
-                if (!float.TryParse(c.Parameter, out var trigger)) continue;
-                if (!float.TryParse(legacy, out var release)) continue;
+                if (!Triggers.ComparisonHelper.TryParseNumber(c.Parameter, out var trigger)) continue;
+                if (!Triggers.ComparisonHelper.TryParseNumber(legacy, out var release)) continue;
 
                 var rise = c.Comparison is ComparisonOperator.Gte or ComparisonOperator.Gt;
                 var fall = c.Comparison is ComparisonOperator.Lte or ComparisonOperator.Lt;

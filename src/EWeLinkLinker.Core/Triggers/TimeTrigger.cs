@@ -38,7 +38,7 @@ public class TimeTrigger : OptimizedTriggerBase
         if (!ValidateParameter(config.Parameter, out var error))
             throw new ArgumentException(error);
 
-        _time = TimeSpan.Parse(config.Parameter!);
+        _time = ParseTime(config.Parameter!);
         _comparison = config.Comparison;
     }
 
@@ -56,13 +56,28 @@ public class TimeTrigger : OptimizedTriggerBase
             errorMessage = "时间不能为空";
             return false;
         }
-        if (!TimeSpan.TryParse(parameter, out _))
+        if (!TryParseTime(parameter, out _))
         {
             errorMessage = "时间格式无效，应为 HH:mm，如 08:00";
             return false;
         }
         errorMessage = null;
         return true;
+    }
+
+    /// <summary>
+    /// 时间串按不变文化解析：跟着系统区域走的话，有些区域的时间分隔符不是冒号（用点），
+    /// 同一份 linker.json 换台机器就解析不出 "08:00"，规则会直接建不起来。
+    /// 语法仍然保持原来的宽（8:10、08:10:00 都收）。
+    /// </summary>
+    private static bool TryParseTime(string? text, out TimeSpan value) =>
+        TimeSpan.TryParse(text, System.Globalization.CultureInfo.InvariantCulture, out value);
+
+    private static TimeSpan ParseTime(string text)
+    {
+        if (!TryParseTime(text, out var value))
+            throw new ArgumentException($"时间格式无效，应为 HH:mm，如 08:00（当前填的是 {text}）");
+        return value;
     }
 
     protected override ValueTask<bool> EvaluateCoreAsync(CancellationToken ct)
