@@ -4,7 +4,6 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:EWeLinkLinker.ConfigApp"
-        xmlns:core="clr-namespace:EWeLinkLinker.Core.Models;assembly=EWeLinkLinker.Core"
         mc:Ignorable="d"
         x:Name="MainWindowRoot"
         Title="EWeLink Linker" Height="750" Width="1200"
@@ -18,6 +17,7 @@
         <local:BoolToStringConverter x:Key="BoolToText" TrueValue="是" FalseValue="否"/>
         <local:StatusToBrushConverter x:Key="StatusToBrush"/>
         <local:ComparisonToDisplayConverter x:Key="ComparisonToDisplayConverter"/>
+        <local:ChannelListConverter x:Key="ChannelList"/>
 
         <!-- (模板选择器已移除，改用 Visibility 绑定) -->
 
@@ -340,21 +340,10 @@
 
                                                                     <!-- 比较运算符 -->
                                                                     <ComboBox Grid.Column="2" SelectedValue="{Binding Comparison}"
+                                                                              ItemsSource="{Binding AvailableComparisons}"
                                                                               SelectionChanged="ComparisonComboBox_SelectionChanged"
                                                                               Margin="0,0,4,0" FontSize="11" VerticalAlignment="Center"
                                                                               Visibility="{Binding ShowComparison, Converter={StaticResource BoolToVis}}">
-                                                                        <ComboBox.ItemsSource>
-                                                                            <x:Array Type="{x:Type core:ComparisonOperator}">
-                                                                                <core:ComparisonOperator>Gte</core:ComparisonOperator>
-                                                                                <core:ComparisonOperator>Gt</core:ComparisonOperator>
-                                                                                <core:ComparisonOperator>Lte</core:ComparisonOperator>
-                                                                                <core:ComparisonOperator>Lt</core:ComparisonOperator>
-                                                                                <core:ComparisonOperator>Eq</core:ComparisonOperator>
-                                                                                <core:ComparisonOperator>Neq</core:ComparisonOperator>
-                                                                                <core:ComparisonOperator>Range</core:ComparisonOperator>
-                                                                                <core:ComparisonOperator>OutsideRange</core:ComparisonOperator>
-                                                                            </x:Array>
-                                                                        </ComboBox.ItemsSource>
                                                                         <ComboBox.ItemTemplate>
                                                                             <DataTemplate>
                                                                                 <TextBlock Text="{Binding Converter={StaticResource ComparisonToDisplayConverter}}"/>
@@ -416,8 +405,10 @@
                                                 <DockPanel>
                                                     <Button Content="浏览" DockPanel.Dock="Right" Width="40" Height="26" FontSize="10"
                                                             Click="AppBrowse_Click" Tag="{Binding}"/>
-                                                    <TextBox Text="{Binding Parameter}" FontSize="11" IsReadOnly="True" Background="#F0F0F0"
-                                                             VerticalContentAlignment="Center" Margin="0,0,4,0"/>
+                                                    <TextBox FontSize="11" Background="White"
+                                                             VerticalContentAlignment="Center" Margin="0,0,4,0"
+                                                             ToolTip="可直接输入进程名（不含 .exe，不带路径），或点「浏览」选择"
+                                                             Text="{Binding Parameter, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"/>
                                                 </DockPanel>
                                             </StackPanel>
                                                                         </DockPanel>
@@ -469,15 +460,20 @@
                                                                               ItemsSource="{Binding DataContext.Devices, ElementName=MainWindowRoot}"
                                                                               DisplayMemberPath="Name"
                                                                               SelectedValuePath="DeviceId"
+                                                                              SelectionChanged="ActionDeviceCombo_SelectionChanged"
                                                                               SelectedValue="{Binding DeviceId, Mode=TwoWay}"/>
 
-                                                                    <!-- 通道选择 -->
-                                                                    <ComboBox Grid.Column="1" SelectedIndex="{Binding Outlet}"
+                                                                    <!-- 通道选择：候选按这台设备的通道数生成（老界面写死 CH0–CH3，8 路插排选不到 4–7） -->
+                                                                    <ComboBox Grid.Column="1" SelectedIndex="{Binding OutletIndex, Mode=TwoWay}"
+                                                                              SelectionChanged="ChannelCombo_SelectionChanged"
                                                                               Margin="0,0,4,0" FontSize="11">
-                                                                        <ComboBoxItem Content="CH0"/>
-                                                                        <ComboBoxItem Content="CH1"/>
-                                                                        <ComboBoxItem Content="CH2"/>
-                                                                        <ComboBoxItem Content="CH3"/>
+                                                                        <ComboBox.ItemsSource>
+                                                                            <MultiBinding Converter="{StaticResource ChannelList}">
+                                                                                <Binding Path="DeviceId"/>
+                                                                                <Binding Path="Outlet"/>
+                                                                                <Binding Path="DataContext.Devices" ElementName="MainWindowRoot"/>
+                                                                            </MultiBinding>
+                                                                        </ComboBox.ItemsSource>
                                                                     </ComboBox>
 
                                                                     <!-- 操作选择 -->

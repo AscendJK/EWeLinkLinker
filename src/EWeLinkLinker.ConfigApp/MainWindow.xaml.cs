@@ -276,6 +276,50 @@ public partial class MainWindow : Window, IDisposable
             {
                 foreach (var cond in rule.Conditions)
                 {
+                    // 两种"界面说保存成功、规则其实已经死了"的情况必须拦在前面：
+                    // ① 这个比较符在本类型里根本没实现（time 只有 =、≠、≥、<，其余分支恒不满足）；
+                    // ② 参数建不出触发器（比如类型换成「应用启动」却还留着上一条的 08:00）——
+                    //    服务端 TriggerManager 是"建不出来就跳过整条规则连同所有动作"。
+                    string? problem = null;
+                    if (cond.ComparisonUnsupported)
+                    {
+                        var cmpText = new ComparisonToDisplayConverter()
+                            .Convert(cond.Comparison, typeof(string), string.Empty, System.Globalization.CultureInfo.InvariantCulture)
+                            as string ?? cond.Comparison.ToString();
+                        problem = $"「{cmpText}」这种比较方式，这类条件没有实现；选它规则就永远不执行（也不会报错）";
+                    }
+                    else if (!TriggerRegistry.TryValidate(new TriggerConfig
+                    {
+                        Type = cond.Type,
+                        Parameter = cond.Parameter,
+                        Parameter2 = cond.Parameter2,
+                        ReleaseBand = cond.ReleaseBand,
+                        Comparison = cond.Comparison
+                    }, out var buildError))
+                    {
+                        problem = buildError;
+                    }
+
+                    if (problem != null)
+                    {
+                        // 停用的规则不拦保存（他可能就是先写着半成品），但要留一行话，
+                        // 免得哪天启用后到处找"为什么不执行"
+                        if (!rule.Enabled)
+                        {
+                            Log($"[保存] 提醒：已停用的规则 [{rule.Name}] 条件「{cond.Type}」有问题 -> {problem}；启用后不会执行");
+                        }
+                        else
+                        {
+                            Log($"[保存] 中止：规则 [{rule.Name}] 条件「{cond.Type}」建不出触发器 -> {problem}");
+                            MessageBox.Show($"规则「{rule.Name}」有一条条件服务端建不起来：\n\n" +
+                                            $"类型：{cond.Type}　参数：{(string.IsNullOrEmpty(cond.Parameter) ? "(空)" : cond.Parameter)}\n" +
+                                            $"原因：{problem}\n\n" +
+                                            "这种条件在服务端会让整条规则（连同它所有动作）被直接跳过，所以本次没有保存。",
+                                            "无法保存", MessageBoxButton.OK, MessageBoxImage.Warning);
+                            return SaveOutcome.Aborted;
+                        }
+                    }
+
                     if (!cond.ShowRelease)
                     {
                         cond.ReleaseBand = ""; // 输入框已隐藏，残留值不写入配置
@@ -288,6 +332,29 @@ public partial class MainWindow : Window, IDisposable
                         MessageBox.Show($"规则「{rule.Name}」的抖动带宽有问题：\n\n{releaseError}",
                                         "无法保存", MessageBoxButton.OK, MessageBoxImage.Warning);
                         return SaveOutcome.Aborted;
+                    }
+                }
+
+                // 通道号越界：模型允许 1-8 通道，老界面写死 CH0-CH3，越界的 outlet 存进去只会让
+                // 服务端在设备上吃到错误，日志里就剩一条 fail
+                foreach (var action in rule.Actions)
+                {
+                    var device = _allDevices.FirstOrDefault(d => d.DeviceId == action.DeviceId);
+                    if (device == null) continue;   // 设备被删的情况交给 ConfigSafety/服务端处理
+                    if (action.Outlet < 0 || action.Outlet >= device.ChannelCount)
+                    {
+                        var msg = $"动作指向「{device.Name}」的通道 {action.Outlet}，这台设备只有 {device.ChannelCount} 路（CH0–CH{device.ChannelCount - 1}）";
+                        if (!rule.Enabled)
+                        {
+                            Log($"[保存] 提醒：已停用的规则 [{rule.Name}] {msg}；启用后这条会失败");
+                        }
+                        else
+                        {
+                            Log($"[保存] 中止：规则 [{rule.Name}] {msg}");
+                            MessageBox.Show($"规则「{rule.Name}」有个动作的通道号超出这台设备的通道数：\n\n{msg}\n\n本次没有保存。",
+                                            "无法保存", MessageBoxButton.OK, MessageBoxImage.Warning);
+                            return SaveOutcome.Aborted;
+                        }
                     }
                 }
             }
@@ -830,25 +897,41 @@ public partial class MainWindow : Window, IDisposable
         {
             if (combo.DataContext is RuleCondition condition)
             {
-                switch (tag)
+                condition.Type = tag;
+
+                // 比较符必须落在本类型真实现的集合里：time 只实现了 Eq/Neq/Gte/Lt，
+                // 其余分支在 TimeTrigger 里是 `_ => false`，留着就等于一条永不执行还不报错的规则。
+                if (!RuleCondition.SupportedComparisons(tag).Contains(condition.Comparison))
                 {
-                    case "time":
-                        // 切换到 time：若当前是数值类型的默认 Gte，则改为 Eq（每天固定时刻）
-                        if (condition.Comparison == ComparisonOperator.Gte)
-                            condition.Comparison = ComparisonOperator.Eq;
-                        break;
-                    case "cpu_temp":
-                    case "cpu_usage":
-                    case "gpu_temp":
-                        // 切换到数值类型：若当前是 time 的默认 Eq，则改为 Gte（阈值语义）
-                        if (condition.Comparison == ComparisonOperator.Eq)
-                            condition.Comparison = ComparisonOperator.Gte;
-                        break;
+                    condition.Comparison = tag == "time" ? ComparisonOperator.Eq : ComparisonOperator.Gte;
+                }
+                else if (tag == "time" && condition.Comparison == ComparisonOperator.Gte)
+                {
+                    // 数值型习惯用「大于等于」，换成固定时刻时给成「等于」更符合预期
+                    condition.Comparison = ComparisonOperator.Eq;
                 }
 
                 // 切换后若已不适用滞回（如换成 time/进程/电源），清掉残留带宽
                 if (!condition.ShowRelease)
                     condition.ReleaseBand = "";
+
+                // 参数也要跟着类型走。残留上一个类型的参数（比如把「时间」改成「应用启动」却还留着 08:00）
+                // 会让服务端建不出触发器，而 TriggerManager 的处理是**跳过整条规则连同它所有动作**，
+                // 界面这边却已经弹了「配置已保存！」——用户完全看不出规则已经死了。
+                var oldParameter = condition.Parameter;
+                if (!TriggerRegistry.TryValidate(new TriggerConfig
+                {
+                    Type = tag,
+                    Parameter = condition.Parameter,
+                    Parameter2 = condition.Parameter2,
+                    ReleaseBand = condition.ReleaseBand,
+                    Comparison = condition.Comparison
+                }, out _))
+                {
+                    var oldType = (e.RemovedItems[0] as ComboBoxItem)?.Tag as string ?? "?";
+                    condition.Parameter = condition.DefaultParameter;
+                    Log($"[条件] 类型 {oldType} → {tag}：原参数「{(string.IsNullOrEmpty(oldParameter) ? "(空)" : oldParameter)}」对新类型不可用，已重置为「{(string.IsNullOrEmpty(condition.Parameter) ? "(空)" : condition.Parameter)}」");
+                }
             }
         }
     }
@@ -895,6 +978,36 @@ public partial class MainWindow : Window, IDisposable
                     return;
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// 通道候选按设备通道数生成，换设备时 ItemsSource 整个换掉，WPF 会趁这一瞬把 SelectedIndex 设成 -1。
+    /// 模型那边 OutletIndex 已经拒绝这个中间态，这里再把选中项指回原来那条，界面不凭空变空白。
+    /// </summary>
+    private void ChannelCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (sender is not ComboBox { SelectedIndex: < 0 } combo) return;
+        if (combo.DataContext is LinkerAction action && action.Outlet >= 0)
+            combo.SelectedIndex = action.Outlet;
+    }
+
+    /// <summary>
+    /// 动作行换设备：名字跟着换（否则配置里留着上一台设备的名），通道号按新设备的通道数收回来。
+    /// 不主动收的话候选变短，WPF 会把选中项夹成 CH0 —— 用户没碰过通道，通道号却悄悄改了，
+    /// 日志里也看不出是谁改的。收回来是显式行为，并且留一行日志。
+    /// </summary>
+    private void ActionDeviceCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (e.RemovedItems.Count == 0) return;          // 初始化绑定，不是他改的
+        if (e.AddedItems[0] is not DeviceInfo device) return;
+        if (sender is not ComboBox { DataContext: LinkerAction action }) return;
+
+        action.Name = device.Name;
+        if (action.Outlet >= device.ChannelCount)
+        {
+            Log($"[动作] 设备换成「{device.Name}」（{device.ChannelCount} 路），原来的通道 {action.Outlet} 在这台设备上不存在，已收回 CH0");
+            action.Outlet = 0;
         }
     }
 

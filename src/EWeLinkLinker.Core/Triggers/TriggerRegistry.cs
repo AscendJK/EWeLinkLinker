@@ -67,6 +67,27 @@ public static class TriggerRegistry
     }
 
     /// <summary>
+    /// 试建一遍再丢掉，只为了拿参数是否可用的结论（GUI 保存前调用）。
+    /// 各触发器的构造函数只做参数解析，不碰传感器/进程/WMI，所以这里没有副作用。
+    /// 服务侧的行为是"建不出来就把整条规则连同所有动作一起跳过"，界面必须提前点名拦下，
+    /// 否则用户看到「配置已保存！」而这条规则再也不会执行。
+    /// </summary>
+    public static bool TryValidate(TriggerConfig config, out string? error)
+    {
+        error = null;
+        try
+        {
+            Create(config).Dispose();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = ex.GetBaseException().Message;
+            return false;
+        }
+    }
+
+    /// <summary>
     /// 获取所有支持的触发器类型（修复：使用缓存的属性信息）
     /// </summary>
     public static IEnumerable<(string TypeKey, string DisplayName, string Description)> GetSupportedTypes()

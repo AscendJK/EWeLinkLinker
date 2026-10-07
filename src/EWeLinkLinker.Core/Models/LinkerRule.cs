@@ -42,6 +42,17 @@ public class LinkerAction : INotifyPropertyChanged
     }
 
     /// <summary>
+    /// 通道下拉绑定这个而不是 Outlet：候选列表重建的一瞬间 WPF 会把 SelectedIndex 设成 -1，
+    /// 那种中间态不该写进配置（越界由 SaveConfig 拦，负数一样）。
+    /// </summary>
+    [JsonIgnore]
+    public int OutletIndex
+    {
+        get => Outlet;
+        set { if (value >= 0) Outlet = value; }
+    }
+
+    /// <summary>
     /// 获取设备完整名称（用于显示）
     /// </summary>
     [JsonIgnore]
@@ -87,6 +98,8 @@ public partial class RuleCondition : ObservableObject
                 OnPropertyChanged(nameof(ParameterUnit));
                 OnPropertyChanged(nameof(ShowComparison));
                 OnPropertyChanged(nameof(ShowRelease));
+                OnPropertyChanged(nameof(AvailableComparisons));
+                OnPropertyChanged(nameof(ComparisonUnsupported));
             }
         }
     }
@@ -167,6 +180,8 @@ public partial class RuleCondition : ObservableObject
                 OnPropertyChanged(nameof(ShowRelease));
                 OnPropertyChanged(nameof(ReleaseParameter));
                 OnPropertyChanged(nameof(ReleaseHint));
+                OnPropertyChanged(nameof(AvailableComparisons));
+                OnPropertyChanged(nameof(ComparisonUnsupported));
             }
         }
     }
@@ -204,6 +219,42 @@ public partial class RuleCondition : ObservableObject
     public bool IsNoParameter => IsPowerEvent;
     [System.Text.Json.Serialization.JsonIgnore]
     public bool ShowComparison => IsTime || IsCpuTemp || IsCpuUsage || IsGpuTemp;
+
+    /// <summary>
+    /// 某个类型"真的实现了"哪些比较符。time 只有这四个 —— TimeTrigger 里其余分支是 `_ => false`，
+    /// 界面上给出来就等于让用户填出一条永不执行、还一声不响的规则。数值型八个都走 ComparisonHelper。
+    /// </summary>
+    public static IReadOnlyList<ComparisonOperator> SupportedComparisons(string type) => type switch
+    {
+        "time" => new[] { ComparisonOperator.Eq, ComparisonOperator.Neq, ComparisonOperator.Gte, ComparisonOperator.Lt },
+        "cpu_temp" or "cpu_usage" or "gpu_temp" => (ComparisonOperator[])Enum.GetValues(typeof(ComparisonOperator)),
+        _ => Array.Empty<ComparisonOperator>(),
+    };
+
+    /// <summary>
+    /// 下拉里该列哪些比较符。旧配置可能存着本类型没实现的比较符（老界面给过全 8 个），
+    /// 那种情况下仍把它列出来，好让用户在保存时看到自己选了个不支持的，而不是界面上凭空变空白。
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public IReadOnlyList<ComparisonOperator> AvailableComparisons =>
+        ShowComparison && !SupportedComparisons(Type).Contains(Comparison)
+            ? SupportedComparisons(Type).Append(Comparison).ToList()
+            : SupportedComparisons(Type);
+
+    /// <summary>类型切换后旧参数对新类型没意义时，界面填这个默认值。</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string DefaultParameter => Type switch
+    {
+        "time" => "08:00",
+        "interval" => "30",
+        "cpu_temp" or "gpu_temp" => "80",
+        "cpu_usage" => "90",
+        _ => "",   // 进程名得他自己选；电源类无需参数
+    };
+
+    /// <summary>本行的比较符在本类型里根本没有实现（保存前必须拦）。</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool ComparisonUnsupported => ShowComparison && !SupportedComparisons(Type).Contains(Comparison);
 
     [System.Text.Json.Serialization.JsonIgnore]
     public string ParameterLabel => Type switch
