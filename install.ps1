@@ -10,18 +10,21 @@ $serviceName = "EWeLinkLinker"
 $displayName = "EWeLink Linker Service"
 $description = "Automatically controls eWeLink devices based on PC power events"
 
-# Start transcript logging
-$logFile = Join-Path $PSScriptRoot "install.log"
-Start-Transcript -Path $logFile -Force
-
-# Check admin privileges
+# 先查权限，再开 transcript。
+# 以前顺序反了：这个脚本也支持从 publish\ConfigApp\ 里跑，而那两个二进制目录现在的
+# ACL 只允许管理员写，非提权会话在 Start-Transcript 就"访问被拒"当场中断
+# （$ErrorActionPreference='Stop'），那句"请以管理员身份运行"永远看不到。
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
     Write-Host "ERROR: 请以管理员身份运行此脚本！" -ForegroundColor Red
     Write-Host "Right-click the program and select 'Run as administrator'" -ForegroundColor Yellow
-    Stop-Transcript
     exit 1
 }
+
+# Start transcript logging（写到 TEMP，免得又踩目录权限）
+$logFile = Join-Path $env:TEMP ("EWeLinkLinker_install_" + (Get-Date).ToString("yyyyMMdd_HHmmss") + ".log")
+Start-Transcript -Path $logFile -Force
+Write-Host "Transcript: $logFile" -ForegroundColor Cyan
 
 # Detect project root
 $scriptDir = $PSScriptRoot
@@ -93,19 +96,37 @@ if (-not (Test-Path $sharedConfig)) {
 }
 
 # Remove existing service if present
+$hadService = $false
+$wasStartup = $null
 try {
     $existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
     if ($existing) {
-        Write-Host "Removing existing service..."
+        $hadService = $true
+        $wasStartup = (Get-CimInstance Win32_Service -Filter "Name='$serviceName'").StartMode
+        Write-Host "Removing existing service... (startup was: $wasStartup)"
         Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2
+        # 等到真停下再删：固定 Sleep 2 在动作还在飞的时候就把服务删了
+        $deadline = (Get-Date).AddSeconds(20)
+        while ((Get-Service -Name $serviceName -ErrorAction SilentlyContinue).Status -ne 'Stopped' -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }
         sc.exe delete $serviceName | Out-Null
-        Start-Sleep -Seconds 3
+        $delExit = $LASTEXITCODE
+        if ($delExit -ne 0) { Write-Host "ERROR: sc.exe delete 退出码 $delExit（1072=已标记删除但句柄还开着，先关掉占用进程再重试）" -ForegroundColor Red; Stop-Transcript; exit 1 }
+        # 删除是异步的：New-Service 撞上"标记删除"会直接失败，所以要等它真的消失
+        $deadline = (Get-Date).AddSeconds(20)
+        while (@(Get-Service -Name $serviceName -ErrorAction SilentlyContinue).Count -gt 0 -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }
+        if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
+            Write-Host "ERROR: 服务还没从 SCM 里消失，继续装会报 1056。请关掉 ConfigApp/服务进程后重跑。" -ForegroundColor Red
+            Stop-Transcript
+            exit 1
+        }
         Write-Host "Existing service removed." -ForegroundColor Green
     }
 }
 catch {
-    Write-Host "Warning: Could not remove existing service: $_" -ForegroundColor Yellow
+    Write-Host "ERROR: Could not remove existing service: $_" -ForegroundColor Red
+    Write-Host "注意：旧服务可能已经被删掉但新服务还没建，装完之前自动化不会运行。" -ForegroundColor Yellow
+    Stop-Transcript
+    exit 1
 }
 
 # Install service (runs as LocalSystem)
@@ -122,6 +143,11 @@ try {
 }
 catch {
     Write-Host "ERROR: Failed to install service: $_" -ForegroundColor Red
+    if ($hadService) {
+        Write-Host "原来的服务已经被删掉了（之前的启动类型：$wasStartup）。" -ForegroundColor Yellow
+        Write-Host "现在这台机器上没有 EWeLinkLinker 服务，规则不会自动执行；修好上面这条错误后重跑本脚本。" -ForegroundColor Yellow
+    }
+    Stop-Transcript
     exit 1
 }
 
