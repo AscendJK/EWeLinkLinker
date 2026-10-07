@@ -135,25 +135,19 @@ public sealed class TriggerManager : IAsyncDisposable
     {
         var triggers = _ruleTriggers.Values.SelectMany(rt => rt.GetTriggers()).ToList();
 
-        for (var round = 1; ; round++)
+        // 有的传感器第一遍就是读不到：CPU 使用率要等一个采样窗口（ReadCpuUsage 首遍刻意返回 NaN），
+        // 温度句柄可能还没建好。这时"不满足"是假的，拿它建基线 ⇒ 第一轮真轮询读到值就变成上升沿
+        // ⇒ 服务一起来就把已满足的规则重发一遍。换个采样窗口再读一遍，最多补两轮（实测一轮就够）。
+        // 兜底：传感器一直读不到（没装驱动/被组策略挡）时不能让启动卡住，跑满预算就按现状建基线。
+        // 判定本体在 SensorReadiness（事件路径共用同一套），这里只管播种特有的两件事：
+        // 清调度器缓存 + 建基线。跑满预算仍有读数未知时记一笔，别让它看起来像"正常建完基线"。
+        var outcome = await SensorReadiness.PollUntilReadingAsync(
+            triggers, MaxSeedRounds, SeedRoundPause, () => _scheduler?.ResetSensorCache());
+
+        foreach (var i in outcome.UnknownIndexes)
         {
-            _scheduler?.ResetSensorCache();  // 上一轮的 NaN 还压在缓存里，不清就等于没重读
-            foreach (var trigger in triggers)
-            {
-                // 必须先 Start 再 PollAsync：PollAsync 里靠 "State == Monitoring" 决定要不要把
-                // 满足转成 Triggered，Idle 状态下读到的值不会写进状态 ⇒ 基线永远是"不满足"，
-                // 第一轮真轮询就变成一个上升沿 ⇒ 服务一起来就把已满足的规则重发一遍。
-                trigger.Start();
-                await trigger.PollAsync();
-            }
-
-            // 有的传感器第一遍就是读不到：CPU 使用率要等一个采样窗口（ReadCpuUsage 首遍刻意返回 NaN），
-            // 温度句柄可能还没建好。这时"不满足"是假的，拿它建基线 ⇒ 第一轮真轮询读到值就变成上升沿
-            // ⇒ 服务一起来就把已满足的规则重发一遍。换个采样窗口再读一遍，最多补两轮（实测一轮就够）。
-            // 兜底：传感器一直读不到（没装驱动/被组策略挡）时不能让启动卡住，跑满预算就按现状建基线。
-            if (round >= MaxSeedRounds || triggers.All(t => t.LastReadingAvailable)) break;
-
-            await Task.Delay(SeedRoundPause);
+            _logger.Warn($"启动播种：条件 {triggers[i].DisplayName}({triggers[i].Id}) 跑了 {MaxSeedRounds} 遍仍没读到值，" +
+                         $"基线按\"不满足\"建立——传感器恢复后第一轮可能被判成上升沿");
         }
 
         foreach (var ruleTrigger in _ruleTriggers.Values)

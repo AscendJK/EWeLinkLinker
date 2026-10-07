@@ -110,6 +110,13 @@ public class LinkerService
     }
 
     /// <summary>
+    /// 事件路径的补读预算：最多补 1 遍、间隔 300ms。
+    /// 播种那套是 3 遍 ×1200ms，这里不能等那么久——boot/shutdown 事件整体有停机预算。
+    /// </summary>
+    private const int EventSeedRounds = 2;
+    private static readonly TimeSpan EventSeedRoundPause = TimeSpan.FromMilliseconds(300);
+
+    /// <summary>
     /// 事件触发时评估规则条件：
     /// - 电源条件已由事件匹配，视为满足（不阻塞）
     /// - 非电源条件用临时触发器实时评估一次（先 Start 播种初始状态，语义与轮询一致）
@@ -120,65 +127,94 @@ public class LinkerService
         var conditions = rule.Conditions;
         if (conditions.Count == 0) return true;
 
-        // 逐条件实时评估
         var results = new bool[conditions.Count];
-        for (int i = 0; i < conditions.Count; i++)
-        {
-            var condition = conditions[i];
-            if (TriggerManager.IsPowerCondition(condition.Type))
-            {
-                results[i] = true; // 电源条件已由事件匹配
-                continue;
-            }
+        // 临时触发器一次建齐、一次补读：逐条各补一遍的话，N 个条件就是 N × 300ms
+        var probes = new List<OptimizedTriggerBase>();
+        var probeConditionIndex = new List<int>();
 
-            try
+        try
+        {
+            for (int i = 0; i < conditions.Count; i++)
             {
-                var config = new TriggerConfig
+                var condition = conditions[i];
+                if (TriggerManager.IsPowerCondition(condition.Type))
                 {
-                    Type = condition.Type,
-                    Parameter = condition.Parameter,
-                    Parameter2 = condition.Parameter2,
-                    ReleaseBand = condition.ReleaseBand,
-                    Comparison = condition.Comparison
-                };
-                using var trigger = TriggerRegistry.Create(config);
-                trigger.Start(); // 播种初始状态（app_start 已知进程、interval 计时起点等）
-                results[i] = await trigger.PollAsync(ct);
+                    results[i] = true; // 电源条件已由事件匹配
+                    continue;
+                }
+
+                try
+                {
+                    var config = new TriggerConfig
+                    {
+                        Type = condition.Type,
+                        Parameter = condition.Parameter,
+                        Parameter2 = condition.Parameter2,
+                        ReleaseBand = condition.ReleaseBand,
+                        Comparison = condition.Comparison
+                    };
+                    probes.Add(TriggerRegistry.Create(config));
+                    probeConditionIndex.Add(i);
+                }
+                catch (Exception ex)
+                {
+                    LogError($"评估规则 [{rule.Name}] 条件 {condition.Type} 失败", ex);
+                    return false;
+                }
             }
-            catch (Exception ex)
+
+            if (probes.Count > 0)
             {
-                LogError($"评估规则 [{rule.Name}] 条件 {condition.Type} 失败", ex);
-                return false;
+                // 和轮询侧同一套判定：第一遍读不到（CPU 使用率要等采样窗口）不能当成"条件不满足"，
+                // 否则开机事件一进来就把规则判死，日志里还写着"条件未满足"。
+                var outcome = await SensorReadiness.PollUntilReadingAsync(
+                    probes, EventSeedRounds, EventSeedRoundPause, resetCache: null, ct);
+
+                for (int k = 0; k < probes.Count; k++)
+                {
+                    var i = probeConditionIndex[k];
+                    results[i] = outcome.Triggered[k];
+                    if (!outcome.ReadingKnown[k])
+                        Log($"  Rule '{rule.Name}': 条件 {conditions[i].Type} 读数未知（补读一遍仍没拿到）——" +
+                            "这不是判定为不满足，但为安全起见本次不执行");
+                }
             }
+
+            // 与 RuleTrigger.EvaluateCompositeCondition 一致：按 OR 分组，组内 AND，组间 OR
+            if (conditions.Count == 1) return results[0];
+
+            var groups = new List<List<int>>();
+            var currentGroup = new List<int> { 0 };
+            for (int i = 1; i < conditions.Count; i++)
+            {
+                if (conditions[i].Operator == LogicalOperator.Or)
+                {
+                    groups.Add(currentGroup);
+                    currentGroup = new List<int> { i };
+                }
+                else
+                {
+                    currentGroup.Add(i);
+                }
+            }
+            groups.Add(currentGroup);
+
+            foreach (var group in groups)
+            {
+                bool groupResult = true;
+                foreach (var idx in group)
+                    groupResult = groupResult && results[idx];
+                if (groupResult) return true;
+            }
+            return false;
         }
-
-        // 与 RuleTrigger.EvaluateCompositeCondition 一致：按 OR 分组，组内 AND，组间 OR
-        if (conditions.Count == 1) return results[0];
-
-        var groups = new List<List<int>>();
-        var currentGroup = new List<int> { 0 };
-        for (int i = 1; i < conditions.Count; i++)
+        finally
         {
-            if (conditions[i].Operator == LogicalOperator.Or)
+            foreach (var probe in probes)
             {
-                groups.Add(currentGroup);
-                currentGroup = new List<int> { i };
-            }
-            else
-            {
-                currentGroup.Add(i);
+                try { probe.Dispose(); } catch { }
             }
         }
-        groups.Add(currentGroup);
-
-        foreach (var group in groups)
-        {
-            bool groupResult = true;
-            foreach (var idx in group)
-                groupResult = groupResult && results[idx];
-            if (groupResult) return true;
-        }
-        return false;
     }
 
     /// <summary>
