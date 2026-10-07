@@ -505,7 +505,7 @@ public class LanClient
         Unacked,
     }
 
-    private async Task<SendStatus> SendPowerAsync(DeviceInfo device, bool turnOn, int outlet)
+    private async Task<SendStatus> SendPowerAsync(DeviceInfo device, bool turnOn, int outlet, CancellationToken ct)
     {
         if (string.IsNullOrEmpty(device.IpAddress))
         {
@@ -540,7 +540,7 @@ public class LanClient
                 Content = content
             };
 
-            var response = await _http.SendAsync(request);
+            var response = await _http.SendAsync(request, ct);
             var json = await response.Content.ReadAsStringAsync();
 
             // 设备会用"非 2xx + 空 body"表达拒绝。不判状态码就会把没做成的事记成成功，
@@ -573,15 +573,18 @@ public class LanClient
         {
             // 连不上/连接被拒：命令根本没送到设备，走 socket 补一次是安全的
             SimpleLogger.Log($"[LAN] {device.Name} HTTP error: {ex.Message}");
-            return await SendViaSocketAsync(device, requestBody);
+            if (ct.IsCancellationRequested) return SendStatus.NotSent;   // 预算已经用完，不再另开一条路
+            return await SendViaSocketAsync(device, requestBody, ct);
         }
         catch (TaskCanceledException)
         {
             // 超时不等于"没送到"：请求已经发出去了，设备很可能已经执行、只是没回话。
             // 原来这里再用裸 socket 补发一次 ⇒ 同一条命令发两遍；外层 SetPowerWithRetryAsync
             // 还会再补一遍。现在按"已发出未确认"返回，重试逻辑见到它就停手。
-            SimpleLogger.Log($"[LAN] {device.Name} HTTP 超时（{_http.Timeout.TotalSeconds:F0}s），" +
-                             "命令可能已被设备执行，不再补发 → 判定失败（未确认）");
+            var why = ct.IsCancellationRequested
+                ? "整体预算到点（关机/睡眠来不及等）"
+                : $"HTTP 超时（{_http.Timeout.TotalSeconds:F0}s）";
+            SimpleLogger.Log($"[LAN] {device.Name} {why}，命令可能已被设备执行，不再补发 → 判定失败（未确认）");
             return SendStatus.Unacked;
         }
         catch (Exception ex)
@@ -621,13 +624,15 @@ public class LanClient
         return text.Length > 120 ? text[..120] : text;
     }
 
-    private async Task<SendStatus> SendViaSocketAsync(DeviceInfo device, object requestBody)
+    private async Task<SendStatus> SendViaSocketAsync(DeviceInfo device, object requestBody, CancellationToken ct)
     {
         var written = false;
         try
         {
             using var client = new TcpClient();
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            // 5 秒是这条路自己的上限，整体预算（关机/睡眠）更紧时以预算为准
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(5));
             await client.ConnectAsync(device.IpAddress, 8081, cts.Token);
 
             var requestJson = JsonSerializer.Serialize(requestBody);
@@ -690,11 +695,22 @@ public class LanClient
         }
     }
 
-    public async Task<bool> SetPowerWithRetryAsync(DeviceInfo device, bool turnOn, int outlet = 0, int maxRetries = 1)
+    /// <summary>
+    /// 下发一条开/关。ct 是"整体预算"（关机/睡眠只有几秒），预算到点就一台都不再开：
+    /// 原来这里没有预算概念，五台设备各奔着 5 秒超时+重试去，系统在 3.5 秒外把进程杀掉，
+    /// 日志里既没说哪台没发、也没说为什么没发。
+    /// </summary>
+    public async Task<bool> SetPowerWithRetryAsync(DeviceInfo device, bool turnOn, int outlet = 0,
+                                                   int maxRetries = 1, CancellationToken ct = default)
     {
         for (int i = 0; i <= maxRetries; i++)
         {
-            var status = await SendPowerAsync(device, turnOn, outlet);
+            if (ct.IsCancellationRequested)
+            {
+                SimpleLogger.Log($"[LAN] {device.Name} 未发出（预算已用完，这一台一次都没尝试）");
+                return false;
+            }
+            var status = await SendPowerAsync(device, turnOn, outlet, ct);
             if (status == SendStatus.Delivered) return true;
 
             if (status == SendStatus.Unacked)
@@ -704,7 +720,15 @@ public class LanClient
                 SimpleLogger.Log($"[LAN] {device.Name} 已发出未确认，跳过重试");
                 return false;
             }
-            if (i < maxRetries) await Task.Delay(500);
+            if (i < maxRetries)
+            {
+                if (ct.IsCancellationRequested)
+                {
+                    SimpleLogger.Log($"[LAN] {device.Name} 未重试（预算已用完）");
+                    return false;
+                }
+                await Task.Delay(500, CancellationToken.None);
+            }
         }
         return false;
     }

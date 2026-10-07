@@ -11,6 +11,7 @@ public abstract class OptimizedTriggerBase : ITrigger
     private TriggerState _state = TriggerState.Idle;
     private bool _disposed;
     private CancellationTokenSource? _resetCts;
+    private int _errorRounds;
 
     /// <summary>
     /// 验证参数是否有效
@@ -84,6 +85,7 @@ public abstract class OptimizedTriggerBase : ITrigger
         {
             var wasMonitoring = State == TriggerState.Monitoring;
             var triggered = await EvaluateCoreAsync(ct);
+            _errorRounds = 0;
             if (triggered && wasMonitoring)
             {
                 State = TriggerState.Triggered;
@@ -115,13 +117,20 @@ public abstract class OptimizedTriggerBase : ITrigger
             }
             return triggered;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            State = TriggerState.Error;
-            // 抛异常同样等于"这一轮没有定论"。不置这个旗标，播种会把异常轮当成
-            // "读到值了、判定为不满足"就收工建基线，传感器恢复后第一轮真读数便成了
-            // 上升沿 ⇒ 服务一起来把已满足的规则重发一遍（NaN 那条路今天已经补了，这是同一条判定的第二个出口）。
+            // 抛异常 = 这一轮没有定论，不等于"条件不再满足"。原来这里无条件打成 Error：
+            // 已经锁存的条件被打回去之后，子类里的 _wasTriggered 还是 true，规则这边再也等不到
+            // 新的上升沿 —— currentResult 长期为 false，而 30 分钟的强制重判要求 currentResult 为真
+            // 才进得去，于是纠偏静默失效，界面上还显示"不满足"。所以锁住的继续锁住，
+            // 只记下"这轮没读到值"（播种会为此再补读一轮）。
             LastReadingAvailable = false;
+            _errorRounds++;
+            var keptLatch = State == TriggerState.Triggered;
+            if (!keptLatch) State = TriggerState.Error;
+            if (_errorRounds == 1 || _errorRounds % 30 == 0)
+                Log(TraceLevel.Warning,
+                    $"第 {_errorRounds} 轮评估抛异常（{(keptLatch ? "保持锁存，不改判" : "转 Error，下一轮重试")}）：{ex.GetType().Name}: {ex.Message}");
             return false;
         }
     }

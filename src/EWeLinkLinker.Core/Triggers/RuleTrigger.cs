@@ -70,6 +70,9 @@ public sealed class RuleTrigger : IDisposable, IPostPollCallback
 
     public IReadOnlyList<OptimizedTriggerBase> GetTriggers() => _conditionTriggers.AsReadOnly();
 
+    /// <summary>这条规则当前是否有一批动作还在跑（供服务停止前等一等）。</summary>
+    public bool ActionInFlight => Volatile.Read(ref _actionInFlight) != 0;
+
     /// <summary>
     /// 轮询完成后评估复合条件（由 PollingScheduler 调用）
     /// H-17 修复：使用 lock 保护 _previousCompositeResult 读写，防止并发竞态

@@ -167,6 +167,27 @@ public sealed class TriggerManager : IAsyncDisposable
     }
 
     /// <summary>
+    /// 等还在跑的动作批次收尾。动作是 fire-and-forget 起的（RuleTrigger 里 Task.Run），
+    /// 服务停止时原来直接 Dispose + 释放 logger：跑到一半的那批既发不完、也来不及把
+    /// "哪台没发"写进日志。给一个短预算等它，等不到就带着说明走。
+    /// </summary>
+    public async Task<bool> WaitForInFlightActionsAsync(TimeSpan budget)
+    {
+        var deadline = DateTime.UtcNow + budget;
+        while (true)
+        {
+            var inFlight = _ruleTriggers.Values.Count(t => t.ActionInFlight);
+            if (inFlight == 0) return true;
+            if (DateTime.UtcNow >= deadline)
+            {
+                _logger.Warn($"停止时仍有 {inFlight} 批动作在飞，预算 {budget.TotalSeconds:F1}s 用尽（这批可能只发了一部分设备）");
+                return false;
+            }
+            await Task.Delay(100);
+        }
+    }
+
+    /// <summary>
     /// 重新加载配置
     /// </summary>
     /// <param name="newRules">新规则列表</param>

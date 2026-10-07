@@ -25,6 +25,16 @@ public class LinkerWindowsService : ServiceBase
     private CancellationTokenSource? _wakeCts; // 修复：唤醒任务取消支持
     private string? _triggerSignature;  // 当前已加载规则的签名，用于跳过无谓的触发器重建
 
+    // 配置热重载串行化：一次重载要换客户端、停旧触发器、起新触发器，两次交叠会把这套状态撕开
+    // （同一规则注册两份、或对着已 Dispose 的触发器再 Stop）。监视器事件汇进这一条通道，
+    // 跑的过程中攒下的变更由同一个循环补做一次，不会丢也不会并发。
+    private ReloadGate? _reloadGate;
+
+    // 关机/睡眠的内层发送预算：Windows 只等几秒就把进程杀掉。内层比外层 Wait 略短，
+    // 留一点时间给"哪一台没发出去"的日志，而不是被掐断后什么都查不到。
+    private const int ShutdownActionBudgetMs = 3000;
+    private const int SleepActionBudgetMs = 1200;
+
     public LinkerWindowsService()
     {
         ServiceName = "EWeLinkLinker";
@@ -227,18 +237,7 @@ public class LinkerWindowsService : ServiceBase
                 }
 
                 Log($"Config file changed: {e.ChangeType} - {e.FullPath}");
-                _ = Task.Run(async () =>
-                {
-                    try
-                    {
-                        await Task.Delay(200); // 等待文件写入完成
-                        await ReloadConfigAsync();
-                    }
-                    catch (Exception ex)
-                    {
-                        Log($"Failed to reload config: {ex.Message}");
-                    }
-                });
+                _ = (_reloadGate ??= new ReloadGate(ReloadWithSettleAsync)).RequestAsync();
             }
 
             _configWatcher.Changed += HandleConfigChange;
@@ -253,6 +252,18 @@ public class LinkerWindowsService : ServiceBase
         {
             Log($"Failed to start config watcher: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// 把一次配置变更汇进串行重载通道。一次保存常连着发 Changed+Renamed+Created 三个事件，
+    /// 老写法每个事件各起一个 Task、各自 sleep 200ms 再重载 ⇒ 重载之间互相踩。
+    /// 等文件写完的 200ms 放在通道里，多个事件合并成一次时就只等一次。
+    /// </summary>
+    private async Task ReloadWithSettleAsync()
+    {
+        await Task.Delay(200);
+        try { await ReloadConfigAsync(); }
+        catch (Exception ex) { Log($"Failed to reload config: {ex.Message}"); }
     }
 
     /// <summary>
@@ -383,6 +394,10 @@ public class LinkerWindowsService : ServiceBase
             try
             {
                 _triggerManager.StopAllAsync().ConfigureAwait(false).GetAwaiter().GetResult();
+                // 规则动作是 fire-and-forget 起的一批：先给它最多 1.5 秒收尾，再往下 Dispose。
+                // 原来这里直接停表释放，发了一半的那批既补不齐、也来不及把"哪台没发"写进日志。
+                _triggerManager.WaitForInFlightActionsAsync(TimeSpan.FromSeconds(1.5))
+                               .ConfigureAwait(false).GetAwaiter().GetResult();
             }
             catch (Exception ex)
             {
@@ -630,8 +645,13 @@ public class LinkerWindowsService : ServiceBase
             if (service != null)
             {
                 Log("Executing shutdown actions...");
-                await service.ExecuteEventAsync("shutdown");
-                Log("Shutdown actions completed");
+                // 内层截止比外层 Wait(3.5s) 略短：到点之后 LinkerService 不再对剩下的设备开新的发送，
+                // 但会把"这一台没发"写进 [AUDIT]，而不是被系统掐断进程、日志里什么都不留
+                using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(ShutdownActionBudgetMs));
+                await service.ExecuteEventAsync("shutdown", cts.Token);
+                Log(cts.IsCancellationRequested
+                    ? "关机联动动作在预算内没跑完（哪台没发看 [AUDIT] 的「未发出（预算不足）」）"
+                    : "Shutdown actions completed");
             }
             else
             {
@@ -653,8 +673,11 @@ public class LinkerWindowsService : ServiceBase
             if (service != null)
             {
                 Log("Executing sleep actions...");
-                await service.ExecuteEventAsync("sleep");
-                Log("Sleep actions completed");
+                using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(SleepActionBudgetMs));
+                await service.ExecuteEventAsync("sleep", cts.Token);
+                Log(cts.IsCancellationRequested
+                    ? "睡眠联动动作在预算内没跑完（哪台没发看 [AUDIT] 的「未发出（预算不足）」）"
+                    : "Sleep actions completed");
             }
         }
         catch (Exception ex)
