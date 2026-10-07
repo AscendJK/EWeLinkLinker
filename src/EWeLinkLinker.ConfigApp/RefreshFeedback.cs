@@ -6,28 +6,34 @@ namespace EWeLinkLinker.ConfigApp;
 /// <summary>
 /// 「刷新状态」的反馈文案。云端与局域网各自可能成/败，而"局域网整段没读到"和"一切正常"
 /// 以前是同一句话，"整机断网"又被报成"云端坏了"——所以两侧的状态都要进文案。
+/// 同理，凡是"已写入配置"这类断言，只有真的落盘成功才许说。
 /// </summary>
 internal static class RefreshFeedback
 {
-    private const string Renewed = "（云端登录已自动续期，新 token 已写入配置）";
-
     internal static string Build(bool cloudOk, string? cloudError, LanStatusResult lan, int lanApplied,
-                                 int totalDevices, bool renewedByRelogin)
+                                 int totalDevices, bool renewedByRelogin,
+                                 bool tokensPersisted = true, bool changesPersisted = true)
     {
+        var renew = renewedByRelogin
+            ? (tokensPersisted ? "（云端登录已自动续期，新 token 已写入配置）"
+                               : "（云端登录已自动续期，但新 token 没能写入配置文件，重启后需重新登录）")
+            : "";
+        var notSaved = changesPersisted ? "" : "（本次改动没有写进配置文件）";
+
         if (!cloudOk)
         {
             var cloudPart = $"云端这次没走通（{cloudError ?? "没有异常信息"}）";
             if (lanApplied > 0)
-                return $"{cloudPart}，已用局域网实时值更新 {lanApplied} 台设备的通道状态{Unanswered(lan, "，")}。";
+                return $"{cloudPart}，已用局域网实时值更新 {lanApplied} 台设备的通道状态{Unanswered(lan, "，")}。{renew}{notSaved}";
 
             return $"两处都没拿到。{cloudPart}；{LanSilentShort(lan)}。";
         }
 
         if (lanApplied > 0)
             return $"状态刷新完成，其中 {lanApplied} 台的通道状态取自局域网实时值，其余 {Math.Max(0, totalDevices - lanApplied)} 台来自云端" +
-                   $"{Unanswered(lan, "（", "）")}{(renewedByRelogin ? Renewed : "")}。";
+                   $"{Unanswered(lan, "（", "）")}。{renew}{notSaved}";
 
-        return $"状态刷新完成（{totalDevices} 台全部来自云端缓存{(renewedByRelogin ? "，云端登录已自动续期，新 token 已写入配置" : "")}）。{LanSilentLong(lan)}";
+        return $"状态刷新完成（{totalDevices} 台全部来自云端缓存）。{LanSilentLong(lan)}{renew}{notSaved}";
     }
 
     /// <summary>问了但没答的设备名。只在"局域网确实读到过、只漏了部分"时才添这句。</summary>

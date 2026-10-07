@@ -30,6 +30,14 @@ public partial class MainWindow : Window, IDisposable
 
     private List<DeviceInfo> _allDevices = new();
     private ObservableCollection<LinkerRule> _rules = new();
+    /// <summary>加载阶段出过错 ⇒ 内存里那份是残的，之后任何保存都不许覆盖磁盘。</summary>
+    private bool _configLoadFailed;
+    /// <summary>本次会话内由登录/自愈拿到的新 token：磁盘上那份是旧的，不能反过来覆盖内存。</summary>
+    private bool _tokensRenewedThisSession;
+    /// <summary>新 token 是否真的落盘成功（false ⇒ 界面不许说"已写入配置"）。</summary>
+    private bool _tokensPersisted = true;
+    /// <summary>控件绑定初始化阶段不许写盘（磁盘值不在下拉选项里时，回填会把它改掉）。</summary>
+    private bool _settingsUiReady;
     private string _userApiKey = string.Empty;
     private string _accessToken = string.Empty;
     private string _refreshToken = string.Empty;
@@ -94,6 +102,10 @@ public partial class MainWindow : Window, IDisposable
             try { await AutoDiscoverIPsOnStartup(); }
             catch (Exception ex) { Debug.WriteLine($"Auto-discovery failed: {ex.Message}"); }
         };
+
+        // LoadConfig 里给「日志」复选框和「轮询」下拉赋值会同步触发这两个 handler；
+        // 从这行之后才算"他手动改的"，才允许写盘
+        _settingsUiReady = true;
     }
 
     public void Dispose()
@@ -124,7 +136,8 @@ public partial class MainWindow : Window, IDisposable
     protected override void OnClosed(EventArgs e)
     {
         // 关闭时自动保存配置
-        try { SaveConfig(); } catch { }
+        // 关窗自动保存不能弹确认框（他可能只是关掉窗口），所以内存比磁盘少时直接跳过并记日志
+        try { SaveConfig(interactive: false); } catch { }
         Dispose();
         base.OnClosed(e);
     }
@@ -193,8 +206,14 @@ public partial class MainWindow : Window, IDisposable
         }
         catch (Exception ex)
         {
+            _configLoadFailed = true;
             Log($"[加载] 错误: {ex.Message}");
             Log($"[加载] 堆栈: {ex.StackTrace}");
+            MessageBox.Show(
+                $"配置文件没有完整加载成功，界面上显示的规则和设备可能不全：\n\n{ex.Message}\n\n" +
+                "在查明之前，本窗口会拒绝\"保存配置\"，也不会用内存这份覆盖磁盘那份。\n" +
+                "请点「打开日志文件夹」看 debug.log 的 [加载] 段落。",
+                "配置加载不完整", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }
 
@@ -245,7 +264,7 @@ public partial class MainWindow : Window, IDisposable
 
     private enum SaveOutcome { Saved, Unchanged, Aborted }
 
-    private SaveOutcome SaveConfig()
+    private SaveOutcome SaveConfig(bool interactive = true)
     {
         try
         {
@@ -276,13 +295,44 @@ public partial class MainWindow : Window, IDisposable
             // 加载现有配置以保留 LoggingEnabled 等设置
             var existingConfig = LinkerConfig.Load(_configPath);
 
+            // 保存是"整份重建再覆盖"，所以先问一句：内存里这份会不会比磁盘少（加载残缺、云端漏返回）
+            var decision = ConfigSafety.Evaluate(_configLoadFailed, _rules.Count, existingConfig.Rules.Count,
+                                                 _allDevices.Count, existingConfig.Devices.Count);
+            if (decision == SaveDecision.RefuseLoadFailed)
+            {
+                Log($"[保存] 中止：配置加载出过错（内存 {_rules.Count} 条规则 / {_allDevices.Count} 台设备），拒绝覆盖磁盘上 {existingConfig.Rules.Count} 条 / {existingConfig.Devices.Count} 台");
+                if (interactive) MessageBox.Show("配置文件之前没有完整加载成功，为避免把没加载出来的规则和设备写没，本次没有保存。\n\n" +
+                                "请先看 debug.log 的 [加载] 段落再处理。",
+                                "无法保存", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return SaveOutcome.Aborted;
+            }
+            if (decision == SaveDecision.ConfirmShrink)
+            {
+                if (!interactive)
+                {
+                    Log($"[保存] 关窗自动保存被跳过：内存（{_rules.Count} 条规则 / {_allDevices.Count} 台设备）比磁盘（{existingConfig.Rules.Count} 条 / {existingConfig.Devices.Count} 台）少，不自动覆盖");
+                    return SaveOutcome.Aborted;
+                }
+                var overwrite = MessageBox.Show(
+                    $"内存里现在是 {_rules.Count} 条规则、{_allDevices.Count} 台设备，磁盘上是 {existingConfig.Rules.Count} 条、{existingConfig.Devices.Count} 台。\n\n" +
+                    "保存会用内存这份整个覆盖磁盘那份。如果这些不是你自己删掉的，选【否】，先去看 debug.log。",
+                    "覆盖确认", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                if (overwrite != MessageBoxResult.Yes)
+                {
+                    Log("[保存] 中止：他选了不覆盖（内存条目比磁盘少）");
+                    return SaveOutcome.Aborted;
+                }
+            }
+
             // 防止回写覆盖：如果磁盘 token 非空且与内存不同，说明被服务端 TokenManager 刷新过
             // 优先用磁盘 token（服务端写入的新 token）
+            // 例外：本次会话刚登录/自愈拿到的是**更新**的 token，磁盘那份才是旧的，不能反过来覆盖
             var accessToken = _accessToken;
             var refreshToken = _refreshToken;
             var userApiKey = _userApiKey;
             var tokenObtainedAtUtc = _tokenObtainedAtUtc;
-            if (!string.IsNullOrEmpty(existingConfig.Tokens.AccessToken)
+            if (!_tokensRenewedThisSession
+                && !string.IsNullOrEmpty(existingConfig.Tokens.AccessToken)
                 && existingConfig.Tokens.AccessToken != _accessToken)
             {
                 accessToken = existingConfig.Tokens.AccessToken;
@@ -341,7 +391,14 @@ public partial class MainWindow : Window, IDisposable
                 return SaveOutcome.Unchanged;
             }
 
-            config.Save(_configPath);
+            if (!config.Save(_configPath))
+            {
+                // Save 内部吞异常只返回 false（文件被占用/只读/磁盘满），不查返回值就会把失败报成"已保存"
+                Log("[保存] 失败：LinkerConfig.Save 返回 false（文件可能被占用或只读）");
+                if (interactive) MessageBox.Show("写入配置文件失败：文件可能正被占用或设为只读。\n\n本次改动没有保存，请先关掉占用该文件的程序（或服务）再试。",
+                                "保存失败", MessageBoxButton.OK, MessageBoxImage.Error);
+                return SaveOutcome.Aborted;
+            }
             Log($"[保存] 配置已保存到: {_configPath}");
 
             // 验证保存的文件
@@ -365,7 +422,7 @@ public partial class MainWindow : Window, IDisposable
     /// Bug 修复：仅保存 Token 和账户信息（用于登录后获取云端设备前）
     /// 优先使用内存中的 _allDevices（含用户刚编辑的 RealMacAddress），磁盘作为后备
     /// </summary>
-    private void SaveTokensOnly()
+    private bool SaveTokensOnly()
     {
         try
         {
@@ -400,12 +457,21 @@ public partial class MainWindow : Window, IDisposable
                 LoggingEnabled = existingConfig.LoggingEnabled,
                 PollingIntervalSeconds = existingConfig.PollingIntervalSeconds  // 保留轮询间隔，登录不该把它打回 5s
             };
-            config.Save(_configPath);
+            if (!config.Save(_configPath))
+            {
+                Log("[登录] Token 写入失败：LinkerConfig.Save 返回 false");
+                _tokensPersisted = false;
+                return false;
+            }
             Log("[登录] Token 已保存");
+            _tokensPersisted = true;
+            return true;
         }
         catch (Exception ex)
         {
             Log($"[登录] 保存 Token 失败: {ex.Message}");
+            _tokensPersisted = false;
+            return false;
         }
     }
 
@@ -1147,7 +1213,15 @@ public partial class MainWindow : Window, IDisposable
 
         try
         {
-            var exePath = Path.Combine(AppContext.BaseDirectory, "..", "Service", "EWeLinkLinker.Service.exe");
+            // 必须规范化：sc create 会把 binPath 原样记进注册表，留下 "ConfigApp\..\Service\..."
+            // 这种路径，将来删掉 ConfigApp 目录服务就起不来，也和 install.ps1 写的干净路径互踩
+            var exePath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "Service", "EWeLinkLinker.Service.exe"));
+            if (!File.Exists(exePath))
+            {
+                MessageBox.Show($"找不到服务程序：\n\n{exePath}\n\n请先确认 publish\\Service 目录完整，再点安装。",
+                                "安装服务", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
 
             // 1. 停止并删除旧服务
             if (status != "NOT_INSTALLED")
@@ -1261,12 +1335,20 @@ public partial class MainWindow : Window, IDisposable
         try
         {
             var want = LoggingCheckBox.IsChecked == true;
+            if (!_settingsUiReady) return;
             var config = LinkerConfig.Load(_configPath);
             // 打开窗口时绑定初始化也会触发这个事件，磁盘值没变就不要重写配置
             if (config.LoggingEnabled == want) return;
 
             config.LoggingEnabled = want;
-            config.Save(_configPath);
+            if (!config.Save(_configPath))
+            {
+                Log("[设置] 日志开关写入失败：Save 返回 false");
+                LoggingCheckBox.IsChecked = !want; // 盘上没改，界面上也不能留着改过的样子
+                MessageBox.Show("写入配置文件失败：日志开关没有改成" + (want ? "启用" : "禁用") + "。文件可能被占用或只读。",
+                                "保存失败", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
             Log($"日志已{(want ? "启用" : "禁用")}");
         }
         catch (Exception ex)
@@ -1288,6 +1370,7 @@ public partial class MainWindow : Window, IDisposable
         try
         {
             int[] intervals = { 1, 2, 3, 5, 10, 15, 30 };
+            if (!_settingsUiReady) return;
             int index = PollingIntervalCombo.SelectedIndex;
             if (index < 0 || index >= intervals.Length) return;
 
@@ -1297,7 +1380,13 @@ public partial class MainWindow : Window, IDisposable
             if (config.PollingIntervalSeconds == newInterval) return;
 
             config.PollingIntervalSeconds = newInterval;
-            config.Save(_configPath);
+            if (!config.Save(_configPath))
+            {
+                Log("[设置] 轮询间隔写入失败：Save 返回 false");
+                MessageBox.Show($"写入配置文件失败：轮询间隔没有改成 {newInterval} 秒。文件可能被占用或只读。",
+                                "保存失败", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
 
             // 配置文件变更会触发服务端的 FileSystemWatcher 自动重载
             Log($"轮询间隔已改为 {newInterval} 秒");
@@ -1571,26 +1660,23 @@ public partial class MainWindow : Window, IDisposable
 
             _cloudClient.Region = region;
             var (tokens, _) = await _cloudClient.LoginAsync(account, password, GetCountryCodeForRegion(region));
-            _userApiKey = tokens.UserApiKey;
-            _accessToken = tokens.AccessToken;
-            _refreshToken = tokens.RefreshToken;
-            _tokenObtainedAtUtc = DateTime.UtcNow;
+            AdoptTokens(tokens.AccessToken, tokens.RefreshToken, tokens.UserApiKey, DateTime.UtcNow);
 
             // Bug 修复：先保存 Token（不保存设备列表），然后获取云端设备并合并旧 MAC 地址
-            SaveTokensOnly();
+            var tokensPersisted = SaveTokensOnly();
 
             // Bug 修复：在清空前保存所有动作的 DeviceId，避免 TwoWay 绑定被清空
             var savedActionDeviceIds = SaveActionDeviceIds();
 
             var devices = await _cloudClient.GetDevicesAsync(tokens.AccessToken);
 
-            // 云端偶发返回空表（结构异常、账号侧异常）。直接替换会把设备下拉清空，
-            // TwoWay 绑定随即把每条规则的 DeviceId 写成 null 并存盘，事后无法自愈
-            if (devices.Count == 0 && _allDevices.Count > 0)
-            {
-                Log($"[登录] 云端返回 0 个设备，保留本地 {_allDevices.Count} 个，不覆盖设备列表");
-                devices = _allDevices;
-            }
+            // 云端偶发返回空表**或只返回一部分**（分页截断、设备被移到别的空间、账号侧异常）。
+            // 整表替换会把被漏掉那台在规则里的动作 DeviceId 写成 null 并落盘，事后无法自愈，
+            // 所以本地已有而云端没给的设备一律保留。
+            var (mergedDevices, keptLocalOnly) = ConfigSafety.KeepMissingLocalDevices(devices, _allDevices);
+            devices = mergedDevices;
+            if (keptLocalOnly.Count > 0)
+                Log($"[登录] 云端这次没返回 {keptLocalOnly.Count} 台，已保留本地条目：{string.Join("、", keptLocalOnly)}");
 
             // Bug 修复：从旧配置中合并用户输入的 RealMacAddress，避免登录后丢失
             MergeDeviceMacAddresses(devices);
@@ -1608,14 +1694,24 @@ public partial class MainWindow : Window, IDisposable
             RestoreActionDeviceIds(savedActionDeviceIds);
 
             // 设备发现完成后，保存完整配置（包含 Token + 设备 + IP）
-            SaveConfig();
+            var savedOutcome = SaveConfig();
 
             RebuildDeviceCards();
             Title = "EWeLink Linker";
 
             var devicesWithIp = _allDevices.Count(d => !string.IsNullOrEmpty(d.IpAddress));
-            MessageBox.Show($"登录成功！获取到 {_allDevices.Count} 个设备，{devicesWithIp} 个有IP地址",
-                "登录", MessageBoxButton.OK, MessageBoxImage.Information);
+            var notes = new List<string>();
+            if (keptLocalOnly.Count > 0)
+                notes.Add($"云端这次没返回 {keptLocalOnly.Count} 台，已保留本地条目：{string.Join("、", keptLocalOnly)}");
+            if (!tokensPersisted)
+                notes.Add("新 token 没能写入配置文件，重启后需要重新登录");
+            if (savedOutcome == SaveOutcome.Aborted)
+                notes.Add("配置没有写进磁盘（原因见上一条弹窗或 debug.log）");
+            MessageBox.Show(
+                $"登录成功！获取到 {_allDevices.Count} 个设备，{devicesWithIp} 个有IP地址" +
+                (notes.Count > 0 ? "\n\n" + string.Join("\n", notes) : ""),
+                "登录", MessageBoxButton.OK,
+                notes.Count > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information);
         }
         catch (Exception ex)
         {
@@ -1660,9 +1756,13 @@ public partial class MainWindow : Window, IDisposable
             RestoreActionDeviceIds(savedActionDeviceIds);
 
             RebuildDeviceCards();
-            SaveConfig();
+            var ipSave = SaveConfig();
             Title = "EWeLink Linker";
-            MessageBox.Show("IP 刷新完成", "刷新完成", MessageBoxButton.OK, MessageBoxImage.Information);
+            MessageBox.Show(ipSave == SaveOutcome.Aborted
+                    ? "IP 已在界面上刷新，但配置没有写进磁盘（原因见上一条弹窗）。"
+                    : "IP 刷新完成",
+                ipSave == SaveOutcome.Aborted ? "部分完成" : "刷新完成",
+                MessageBoxButton.OK, ipSave == SaveOutcome.Aborted ? MessageBoxImage.Warning : MessageBoxImage.Information);
         }
         catch (Exception ex)
         {
@@ -1758,22 +1858,23 @@ public partial class MainWindow : Window, IDisposable
                 Log($"[刷新状态] {localDevice.Name} 的通道状态取自局域网实时值 (seq={live.Seq}, {live.SourceIp})");
             }
 
-            var feedback = RefreshFeedback.Build(cloudDevices != null, cloudError, lan, lanApplied,
-                                                 _allDevices.Count, renewedByRelogin);
-
             if (cloudDevices == null && lanApplied == 0)
             {
                 // 两侧都没东西可显示：不重建卡片也不写盘，但要把"云端怎么了"和"局域网为什么没读到"一起说
                 Title = "EWeLink Linker";
-                MessageBox.Show(feedback, "刷新失败", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show(RefreshFeedback.Build(false, cloudError, lan, 0, _allDevices.Count, renewedByRelogin),
+                                "刷新失败", MessageBoxButton.OK, MessageBoxImage.Error);
                 return;
             }
 
             RebuildDeviceCards();
             // Bug 修复：刷新状态后保存配置，防止崩溃后丢失
-            SaveConfig();
+            var stateSave = SaveConfig();
             Title = "EWeLink Linker";
 
+            var feedback = RefreshFeedback.Build(cloudDevices != null, cloudError, lan, lanApplied,
+                                                 _allDevices.Count, renewedByRelogin,
+                                                 _tokensPersisted, stateSave != SaveOutcome.Aborted);
             MessageBox.Show(feedback, cloudDevices == null ? "部分完成" : "刷新完成",
                 MessageBoxButton.OK, cloudDevices == null ? MessageBoxImage.Warning : MessageBoxImage.Information);
         }
@@ -1817,6 +1918,7 @@ public partial class MainWindow : Window, IDisposable
         _refreshToken = refreshToken;
         if (!string.IsNullOrEmpty(userApiKey)) _userApiKey = userApiKey;
         _tokenObtainedAtUtc = obtainedAtUtc;
+        _tokensRenewedThisSession = true;
     }
 
     /// <summary>
