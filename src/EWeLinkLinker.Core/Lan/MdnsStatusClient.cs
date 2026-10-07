@@ -16,6 +16,8 @@ namespace EWeLinkLinker.Core.Lan;
 public class MdnsStatusClient
 {
     private const string ServiceName = "_ewelink._tcp.local.";
+    /// <summary>查询名要带尾点，但解析应答里的主名时尾点会被当成根标签吃掉，比对得用不带尾点的形式。</summary>
+    private static readonly string ServiceSuffix = ServiceName.TrimEnd('.');
     private static readonly IPAddress MdnsGroup = IPAddress.Parse("224.0.0.251");
     private const int MdnsPort = 5353;
 
@@ -74,6 +76,11 @@ public class MdnsStatusClient
                 targets.Values.Select(t => t.Name).ToList());
         }
 
+        // 同一台设备在一轮里会收到好几份应答（组播 + 单播各一份、邻居重发、甚至别人仿的），
+        // 谁先到就用谁是错的：先到的很可能是上一轮的旧状态。分两摞收，最后按 seq 挑最新的。
+        var strictBest = new Dictionary<string, LanDeviceStatus>();   // 应答形态合格（QR=1 且 TXT 主名是 _ewelink 服务）
+        var looseBest = new Dictionary<string, LanDeviceStatus>();    // 读得懂但形态不合格，只兜底用
+
         using (udp)
         {
             var query = BuildQuery(ServiceName);
@@ -101,9 +108,23 @@ public class MdnsStatusClient
                 try { recv = await receive.ConfigureAwait(false); }
                 catch (Exception) { break; }
 
-                ParsePacket(recv.Buffer, recv.RemoteEndPoint.Address.ToString(), targets, result);
+                ParsePacket(recv.Buffer, recv.RemoteEndPoint.Address.ToString(), targets, strictBest, looseBest);
             }
         }
+
+        // 两摞里按 seq 取新的那一份：seq 才是"哪份更晚"的证据。主名不合格的那份如果 seq 更新，
+        // 说明设备换了广播形态，这时硬守着旧的那份反而会读到过期状态；seq 相同才让合格的赢。
+        foreach (var (key, status) in strictBest) result[key] = status;
+        var looseChosen = new HashSet<string>();
+        foreach (var (key, status) in looseBest)
+        {
+            if (result.TryGetValue(key, out var current) && !IsNewerSeq(status.Seq, current.Seq)) continue;
+            result[key] = status;
+            looseChosen.Add(key);
+        }
+        if (looseChosen.Count > 0)
+            SimpleLogger.Log($"[LanStatus] {looseChosen.Count} 台取到的是形态不合格的 mDNS 应答" +
+                             "（不是应答包，或 TXT 主名不属于 _ewelink 服务）");
 
         var unanswered = targets.Values
             .Where(t => !result.ContainsKey(t.DeviceId.ToLowerInvariant()))
@@ -198,9 +219,12 @@ public class MdnsStatusClient
     }
 
     private static void ParsePacket(byte[] buf, string sourceIp, Dictionary<string, DeviceInfo> targets,
-        Dictionary<string, LanDeviceStatus> result)
+        Dictionary<string, LanDeviceStatus> strictBest, Dictionary<string, LanDeviceStatus> looseBest)
     {
         if (buf.Length < 12) return;
+        // QR=0 是查询包（我们自己发出去又被组播回来的、或邻居发的），就算带着 ANCOUNT 也不能当应答读
+        if ((buf[2] & 0x80) == 0) return;
+
         int qd = (buf[4] << 8) | buf[5], an = (buf[6] << 8) | buf[7], ns = (buf[8] << 8) | buf[9], ar = (buf[10] << 8) | buf[11];
         int pos = 12;
 
@@ -220,13 +244,14 @@ public class MdnsStatusClient
             pos += 10;
             if (pos + rdlen > buf.Length) return;
 
-            if (type == 16) TryConsumeTxt(buf, pos, rdlen, name, sourceIp, targets, result);
+            if (type == 16) TryConsumeTxt(buf, pos, rdlen, name, sourceIp, targets, strictBest, looseBest);
             pos += rdlen;
         }
     }
 
     private static void TryConsumeTxt(byte[] buf, int start, int rdlen, string recordName, string sourceIp,
-        Dictionary<string, DeviceInfo> targets, Dictionary<string, LanDeviceStatus> result)
+        Dictionary<string, DeviceInfo> targets, Dictionary<string, LanDeviceStatus> strictBest,
+        Dictionary<string, LanDeviceStatus> looseBest)
     {
         var kv = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         int end = start + rdlen, t = start;
@@ -245,7 +270,6 @@ public class MdnsStatusClient
         if (!kv.TryGetValue("id", out var rawId)) return;
         var deviceId = rawId.Trim();
         if (!targets.TryGetValue(deviceId.ToLowerInvariant(), out var device)) return;
-        if (result.ContainsKey(deviceId.ToLowerInvariant())) return;
 
         var data = new StringBuilder();
         for (int i = 1; i <= 8; i++)
@@ -262,7 +286,31 @@ public class MdnsStatusClient
         if (channels.Count == 0) return;
 
         int seq = kv.TryGetValue("seq", out var seqText) && int.TryParse(seqText, out var parsedSeq) ? parsedSeq : 0;
-        result[deviceId.ToLowerInvariant()] = new LanDeviceStatus(deviceId, channels, seq, sourceIp);
+        var status = new LanDeviceStatus(deviceId, channels, seq, sourceIp);
+        // TXT 的主名必须是 _ewelink 服务下的实例名；别的服务（_http、_printer）的 TXT 里
+        // 恰好也有 id=/data1= 时不该被当成插座状态，但它仍进兜底那一摞，不至于把真状态说成"没人应答"。
+        // 注意比的是去掉尾点的形式：ReadName 解析出来的名字末尾没有那个点。
+        var qualified = recordName.EndsWith(ServiceSuffix, StringComparison.OrdinalIgnoreCase);
+        RememberBest(qualified ? strictBest : looseBest, deviceId.ToLowerInvariant(), status);
+    }
+
+    /// <summary>
+    /// seq 到上限会回绕，所以"数值大"不等于"更新"：用半个窗口内的差判断先后。
+    /// 直接比大小会在回绕那一刻把新应答判成旧的，然后整天读回回绕前的状态。
+    /// </summary>
+    private const int SeqWindow = 1 << 16;
+
+    private static bool IsNewerSeq(int candidate, int current)
+    {
+        int diff = (candidate - current) % SeqWindow;
+        if (diff < 0) diff += SeqWindow;
+        return diff > 0 && diff < SeqWindow / 2;
+    }
+
+    private static void RememberBest(Dictionary<string, LanDeviceStatus> best, string key, LanDeviceStatus status)
+    {
+        if (!best.TryGetValue(key, out var existing) || IsNewerSeq(status.Seq, existing.Seq))
+            best[key] = status;
     }
 
     private static Dictionary<int, bool> ReadSwitches(string json)
