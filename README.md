@@ -483,7 +483,6 @@ EWeLinkLinker/
 | `System.Diagnostics.PerformanceCounter` | CPU 使用率计数器 | MIT |
 | `Microsoft.Extensions.Logging.Abstractions` | 日志抽象接口 | MIT |
 | `System.ServiceProcess.ServiceController` | `System.ServiceProcess` 服务基类（`ServiceBase.Run`） | MIT |
-| `System.IdentityModel.Tokens.Jwt` | **当前代码没有调用它**（eWeLink 的 access token 不是 JWT，按 JWT 解是错的），只是还挂在 `Core.csproj` 上、程序集仍随发布输出 | MIT |
 | [.NET 运行时 / 基础库](https://dotnet.microsoft.com) | 编译与运行 | MIT |
 | [AlexxIT/SonoffLAN](https://github.com/AlexxIT/SonoffLAN) | 登录流程与云端 API 协议的参考实现 | MIT |
 

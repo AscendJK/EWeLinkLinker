@@ -11,7 +11,6 @@
   <ItemGroup>
     <PackageReference Include="LibreHardwareMonitorLib" Version="0.9.4" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.10" />
-    <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.21.0" />
     <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="10.0.10" />
     <PackageReference Include="System.Management" Version="10.0.10" />
   </ItemGroup>
