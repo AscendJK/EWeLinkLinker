@@ -1050,14 +1050,23 @@ public partial class MainWindow : Window, IDisposable
     }
 
     /// <summary>
-    /// 通道候选按设备通道数生成，换设备时 ItemsSource 整个换掉，WPF 会趁这一瞬把 SelectedIndex 设成 -1。
-    /// 模型那边 OutletIndex 已经拒绝这个中间态，这里再把选中项指回原来那条，界面不凭空变空白。
+    /// 通道候选按设备通道数生成，换设备时候选整个换列表，被选中的那一项会从列表里消失。
+    /// 这时 WPF 停在"SelectedIndex 有值、SelectedItem 是 null"的半截状态上不再自己回头补（实测：
+    /// 8 路 CH5 换 4 路，模型和盘上都是 CH0，屏幕上那一格是空的），所以要把这一项显式放回去。
+    /// 只防 SelectedIndex<0 不够——负数那一支根本走不到；晚一拍再指是防列表还在换。
     /// </summary>
     private void ChannelCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (sender is not ComboBox { SelectedIndex: < 0 } combo) return;
-        if (combo.DataContext is LinkerAction action && action.Outlet >= 0)
-            combo.SelectedIndex = action.Outlet;
+        if (sender is not ComboBox combo) return;
+        if (combo.SelectedItem != null) return;
+        if (combo.DataContext is not LinkerAction action) return;
+        combo.Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (combo.SelectedItem != null) return;
+            if (action.Outlet < 0 || action.Outlet >= combo.Items.Count) return;
+            combo.SelectedIndex = -1;
+            combo.SelectedItem = combo.Items[action.Outlet];
+        }), System.Windows.Threading.DispatcherPriority.Background);
     }
 
     /// <summary>
