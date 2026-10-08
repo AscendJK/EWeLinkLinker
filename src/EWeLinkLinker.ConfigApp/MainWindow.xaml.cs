@@ -339,6 +339,30 @@ public partial class MainWindow : Window, IDisposable
                 // 服务端在设备上吃到错误，日志里就剩一条 fail
                 foreach (var action in rule.Actions)
                 {
+                    // deviceId 空＝这条动作谁都不指向。服务端 ExecuteActionAsync 找不到设备就 return，
+                    // 只在日志留一行 "Device not found: "——规则看起来在跑，实际那一路永远不下发。
+                    // 界面上一旦出现空值就说明有别的东西把选中项抹掉了（刷新设备列表那一瞬间就是这条路），
+                    // 所以要拦下来点名，而不是替他存成一条永远不会生效的动作。
+                    if (string.IsNullOrWhiteSpace(action.DeviceId))
+                    {
+                        var msg = $"动作「{action.Name} 通道{action.Outlet}: {(action.State == "on" ? "开" : "关")}」没有指向任何设备（设备那一格是空的）";
+                        if (!rule.Enabled)
+                        {
+                            Log($"[保存] 提醒：已停用的规则 [{rule.Name}] {msg}；启用后这一路不会下发");
+                        }
+                        else
+                        {
+                            Log($"[保存] 中止：规则 [{rule.Name}] {msg}");
+                            // 关窗自动保存（interactive:false）不能弹框——那是他只是想关掉窗口；
+                            // 和 ConfigSafety 那几道闸门一样：静默跳过写盘，日志留痕。
+                            if (interactive)
+                                MessageBox.Show($"规则「{rule.Name}」有个动作没有选中设备：\n\n{msg}\n\n" +
+                                                "请在这一行的设备下拉里重新选一次设备，再点「保存配置」。\n本次没有保存。",
+                                                "无法保存", MessageBoxButton.OK, MessageBoxImage.Warning);
+                            return SaveOutcome.Aborted;
+                        }
+                    }
+
                     var device = _allDevices.FirstOrDefault(d => d.DeviceId == action.DeviceId);
                     if (device == null) continue;   // 设备被删的情况交给 ConfigSafety/服务端处理
                     if (action.Outlet < 0 || action.Outlet >= device.ChannelCount)
@@ -1043,6 +1067,7 @@ public partial class MainWindow : Window, IDisposable
     /// </summary>
     private void ActionDeviceCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (e.AddedItems.Count == 0) return;          // 设备表被换掉的一瞬间：选中项为空不是他把设备改成了"无"
         if (e.RemovedItems.Count == 0) return;          // 初始化绑定，不是他改的
         if (e.AddedItems[0] is not DeviceInfo device) return;
         if (sender is not ComboBox { DataContext: LinkerAction action }) return;
