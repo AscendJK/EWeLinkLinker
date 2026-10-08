@@ -2,6 +2,8 @@
 
 > Windows 智能设备联动控制系统 - 根据 PC 状态自动控制 eWeLink 智能设备
 
+本项目采用 **MIT 许可证**（见 [LICENSE](LICENSE)）；用到的第三方组件各自的许可见[许可与第三方组件](#许可与第三方组件)。
+
 ## 目录
 
 - [快速开始](#快速开始)
@@ -13,6 +15,7 @@
 - [添加新的触发条件](#添加新的触发条件)
 - [日志系统](#日志系统)
 - [开发注意事项](#开发注意事项)
+- [许可与第三方组件](#许可与第三方组件)
 - [致谢](#致谢)
 
 ---
@@ -463,6 +466,34 @@ EWeLinkLinker/
 - 使用 `[Trigger]` 特性自动注册
 - 非托管资源在 `OnDispose()` 中释放
 - 日志使用 `Log(TraceLevel, message)` 方法
+
+---
+
+## 许可与第三方组件
+
+本项目自身代码采用 **MIT 许可证**，全文见仓库根目录的 [LICENSE](LICENSE)。
+
+下面是本项目依赖/参考的第三方组件各自的许可（这些许可**不覆盖**本项目自身代码，但随二进制分发时需要一并保留其声明）：
+
+| 组件 | 在项目里的作用 | 许可 |
+| --- | --- | --- |
+| `LibreHardwareMonitorLib` | 读 CPU/GPU 温度与使用率 | **MPL-2.0** |
+| `HidSharp`（随上面那个包传递进来，发布目录里有 `HidSharp.dll`） | USB HID 设备访问 | **Apache-2.0** |
+| `System.Management` | WMI（`MSAcpi_ThermalZoneTemperature` 读 CPU 温度） | MIT |
+| `System.Diagnostics.PerformanceCounter` | CPU 使用率计数器 | MIT |
+| `Microsoft.Extensions.Logging.Abstractions` | 日志抽象接口 | MIT |
+| `System.ServiceProcess.ServiceController` | `System.ServiceProcess` 服务基类（`ServiceBase.Run`） | MIT |
+| `System.IdentityModel.Tokens.Jwt` | **当前代码没有调用它**（eWeLink 的 access token 不是 JWT，按 JWT 解是错的），只是还挂在 `Core.csproj` 上、程序集仍随发布输出 | MIT |
+| [.NET 运行时 / 基础库](https://dotnet.microsoft.com) | 编译与运行 | MIT |
+| [AlexxIT/SonoffLAN](https://github.com/AlexxIT/SonoffLAN) | 登录流程与云端 API 协议的参考实现 | MIT |
+
+> 上表许可标识的出处：直接依赖取自各自 NuGet 包 `.nuspec` 里的 `<license type="expression">`，
+> `HidSharp` 取自包内 `LICENSE.txt` 原文。
+>
+> MPL-2.0 是**文件级**copyleft：以库的形式引用它不影响本项目用 MIT，只要没有修改它自己的源文件；
+> 若日后改了它的文件，那些文件仍须保持 MPL-2.0 并提供源码。
+>
+> 这些许可**不覆盖**本项目自身代码，但分发发布产物（`publish/` 下那一堆 dll）时需要一并保留它们的版权声明。
 
 ---
 
