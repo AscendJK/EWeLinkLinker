@@ -457,8 +457,13 @@ EWeLinkLinker/
 │   ├── ConfigApp/                    # ConfigApp 发布
 │   ├── Service/                      # 服务发布
 │   └── config/                       # 共享配置文件
+├── bench/                            # 开发期台架脚本（不参与构建，见 bench/README.md）
 └── build-all.bat                     # 构建脚本
 ```
+
+### 台架脚本（bench/）
+
+改界面行为、改触发器语义、或者要往 `publish` 上装东西之前，先看 [bench/README.md](bench/README.md)：里面是 GUI 回归臂怎么跑、部署脚本什么时候允许不停服务、以及"判成功"应当读哪一行。这些脚本按作者那台机器写死了路径和服务名，换机器要改头部变量。
 
 ### 代码规范
 
