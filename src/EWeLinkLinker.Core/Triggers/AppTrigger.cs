@@ -377,3 +377,88 @@ public class AppCloseTrigger : OptimizedTriggerBase
         return ValueTask.FromResult(false);
     }
 }
+
+/// <summary>
+/// 应用运行中触发器（**状态型**）。
+///
+/// 和 app_start / app_close 的区别就在这一句：那两个是"事件"（发生一次算一次），
+/// 这个问的是"此刻在不在跑"。所以它**不挂脉冲窗口**，满足就锁存、进程退出才复位。
+/// 这也是 `唤醒 AND chrome 在运行` 唯一的正确写法——唤醒那一刻并没有"刚启动"这回事。
+///
+/// 进程匹配沿用 AppStartTrigger 的同一套规则（精确 → 首词 → 单向包含 → 窗口标题），
+/// 免得同一条规则里 app_start(chrome) 与 app_running(chrome) 对同一个进程给出不同结论。
+/// </summary>
+[Trigger("app_running", "应用运行中", "指定进程正在运行时满足")]
+public class AppRunningTrigger : OptimizedTriggerBase
+{
+    private readonly string _processName;
+    private bool _wasTriggered;
+
+    public override string Type => "app_running";
+    public override string DisplayName => "应用运行中";
+
+    public AppRunningTrigger(TriggerConfig config) : base()
+    {
+        if (!ValidateParameter(config.Parameter, out var error))
+            throw new ArgumentException(error);
+
+        _processName = AppStartTrigger.ExtractProcessName(config.Parameter!);
+    }
+
+    public override bool ValidateParameter(string parameter, out string? errorMessage)
+    {
+        if (string.IsNullOrEmpty(parameter))
+        {
+            errorMessage = "进程名不能为空";
+            return false;
+        }
+        if (parameter.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+        {
+            errorMessage = "进程名包含非法字符";
+            return false;
+        }
+        errorMessage = null;
+        return true;
+    }
+
+    protected override void OnStart() => _wasTriggered = false;
+
+    /// <summary>
+    /// 当前匹配的进程 ID；枚举本身失败时返回 null——**不等于**"没在跑"。
+    /// 测试可以覆盖这里喂一份受控的进程表。
+    /// </summary>
+    protected virtual List<int>? FindCurrentProcessIds()
+    {
+        try { return AppStartTrigger.FindMatchingProcessIds(_processName, SensorCache); }
+        catch { return null; }
+    }
+
+    protected override ValueTask<bool> EvaluateCoreAsync(CancellationToken ct)
+    {
+        var ids = FindCurrentProcessIds();
+        if (ids == null)
+        {
+            // 这一轮没有定论：不要把已锁存的"在跑"判成"没跑"，
+            // 否则一次偶发的枚举失败就会放开规则，下次再满足就重发一遍动作。
+            LastReadingAvailable = false;
+            return ValueTask.FromResult(false);
+        }
+
+        var running = ids.Count > 0;
+
+        // 边沿检测：从"没在跑"变成"在跑"时报一次；之后锁存到进程退出为止
+        if (running && !_wasTriggered)
+        {
+            _wasTriggered = true;
+            return ValueTask.FromResult(true);
+        }
+
+        if (!running && _wasTriggered)
+        {
+            _wasTriggered = false;
+            State = TriggerState.Monitoring;
+        }
+
+        return ValueTask.FromResult(false);
+    }
+}

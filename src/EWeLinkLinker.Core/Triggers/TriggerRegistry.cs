@@ -62,7 +62,12 @@ public static class TriggerRegistry
         }
         catch (Exception ex)
         {
-            throw new InvalidOperationException($"Failed to create trigger of type '{config.Type}': {ex.Message}", ex);
+            // Activator.CreateInstance 会把构造函数里抛的异常包进 TargetInvocationException，
+            // 直接取 Message 得到的是 "Exception has been thrown by the target of an invocation."
+            // ——服务日志与界面提示都会变成这句废话，真正的原因（"进程名不能为空"）反而丢了。
+            var reason = (ex as System.Reflection.TargetInvocationException)?.InnerException ?? ex;
+            throw new InvalidOperationException(
+                $"Failed to create trigger of type '{config.Type}': {reason.Message}", reason);
         }
     }
 

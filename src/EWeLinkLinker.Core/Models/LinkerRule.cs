@@ -90,7 +90,7 @@ public partial class RuleCondition : ObservableObject
                 OnPropertyChanged(nameof(IsCpuUsage));
                 OnPropertyChanged(nameof(IsGpuTemp));
                 OnPropertyChanged(nameof(IsNumeric));
-                OnPropertyChanged(nameof(IsAppEvent));
+                OnPropertyChanged(nameof(IsProcessCondition));
                 OnPropertyChanged(nameof(IsPowerEvent));
                 OnPropertyChanged(nameof(IsNoParameter));
                 OnPropertyChanged(nameof(ParameterLabel));
@@ -211,8 +211,12 @@ public partial class RuleCondition : ObservableObject
     public bool IsGpuTemp => Type == "gpu_temp";
     [System.Text.Json.Serialization.JsonIgnore]
     public bool IsNumeric => IsInterval || IsCpuTemp || IsCpuUsage || IsGpuTemp;
+    /// <summary>
+    /// 需要填"进程名"的条件。注意 app_running 是**状态**型（此刻在不在跑），
+    /// app_start / app_close 是**事件**型——三者共用同一个进程名输入框和同一套匹配规则。
+    /// </summary>
     [System.Text.Json.Serialization.JsonIgnore]
-    public bool IsAppEvent => Type == "app_start" || Type == "app_close";
+    public bool IsProcessCondition => Type is "app_start" or "app_close" or "app_running";
     [System.Text.Json.Serialization.JsonIgnore]
     public bool IsPowerEvent => Type is "boot" or "shutdown" or "sleep" or "wake";
     [System.Text.Json.Serialization.JsonIgnore]
@@ -264,7 +268,7 @@ public partial class RuleCondition : ObservableObject
         "cpu_temp" => "温度",
         "cpu_usage" => "使用率",
         "gpu_temp" => "温度",
-        "app_start" or "app_close" => "进程名",
+        "app_start" or "app_close" or "app_running" => "进程名",
         _ => ""
     };
 
@@ -285,7 +289,7 @@ public partial class RuleCondition : ObservableObject
         "cpu_temp" => "80",
         "cpu_usage" => "90",
         "gpu_temp" => "80",
-        "app_start" or "app_close" => "notepad",
+        "app_start" or "app_close" or "app_running" => "notepad",
         _ => ""
     };
 
