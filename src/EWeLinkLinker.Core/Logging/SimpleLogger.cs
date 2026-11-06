@@ -16,6 +16,22 @@ public static class SimpleLogger
     private static StreamWriter? _writer;  // 复用 StreamWriter，避免频繁 new FileStream
     private static DateTime _writerDate = DateTime.MinValue;
 
+    /// <summary>行首已经是时间戳了吗（触发器与 LinkerService 会自己拼一个）。</summary>
+    private static readonly Regex LeadingTimestamp =
+        new(@"^\[\d{2}:\d{2}:\d{2}(?:[.,]\d{1,3})?\]", RegexOptions.Compiled);
+
+    internal static bool HasLeadingTimestamp(string message) => LeadingTimestamp.IsMatch(message);
+
+    /// <summary>
+    /// 拼最终写入的那一行：已经带时间戳的不再补一个。
+    ///
+    /// 不这么做的话，同一份 service-detail-*.log 里会并存两种格式——
+    /// 传感器行 `[00:00:01] [00:00:01] [INFO] …`（`OptimizedTriggerBase` 拼了一次、这里又拼一次），
+    /// AUDIT 行 `[00:18:13] [AUDIT] …`（只有这里拼）。按时间戳做正则抓数时会错位。
+    /// </summary>
+    internal static string ComposeLine(string message, DateTime now) =>
+        HasLeadingTimestamp(message) ? message : $"[{now:HH:mm:ss}] {message}";
+
     /// <summary>
     /// 文件名里带日期时（服务端的 service-detail-yyyy-MM-dd.log），跨零点必须自己换文件：
     /// 路径是启动时算一次的，不滚就会整天往昨天的文件里写。
@@ -73,7 +89,7 @@ public static class SimpleLogger
                         bufferSize: 4096, useAsync: false);
                     _writer = new StreamWriter(stream) { AutoFlush = true };
                 }
-                _writer.WriteLine($"[{DateTime.Now:HH:mm:ss}] {message}");
+                _writer.WriteLine(ComposeLine(message, DateTime.Now));
 
                 _writeCount++;
                 if (_writeCount % 200 == 0)

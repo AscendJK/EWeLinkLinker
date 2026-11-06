@@ -1,4 +1,4 @@
-﻿using System.Collections.ObjectModel;
+using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -311,11 +311,14 @@ public partial class MainWindow : Window, IDisposable
                         else
                         {
                             Log($"[保存] 中止：规则 [{rule.Name}] 条件「{cond.Type}」建不出触发器 -> {problem}");
-                            MessageBox.Show($"规则「{rule.Name}」有一条条件服务端建不起来：\n\n" +
-                                            $"类型：{cond.Type}　参数：{(string.IsNullOrEmpty(cond.Parameter) ? "(空)" : cond.Parameter)}\n" +
-                                            $"原因：{problem}\n\n" +
-                                            "这种条件在服务端会让整条规则（连同它所有动作）被直接跳过，所以本次没有保存。",
-                                            "无法保存", MessageBoxButton.OK, MessageBoxImage.Warning);
+                            // 关窗自动保存（interactive:false）不能弹框——那只是他想关窗口。
+                            // 和下面几道闸门一样：静默跳过写盘，日志留痕。
+                            if (interactive)
+                                MessageBox.Show($"规则「{rule.Name}」有一条条件服务端建不起来：\n\n" +
+                                                $"类型：{cond.Type}　参数：{(string.IsNullOrEmpty(cond.Parameter) ? "(空)" : cond.Parameter)}\n" +
+                                                $"原因：{problem}\n\n" +
+                                                "这种条件在服务端会让整条规则（连同它所有动作）被直接跳过，所以本次没有保存。",
+                                                "无法保存", MessageBoxButton.OK, MessageBoxImage.Warning);
                             return SaveOutcome.Aborted;
                         }
                     }
@@ -329,8 +332,9 @@ public partial class MainWindow : Window, IDisposable
                                                           cond.Comparison, out var releaseError))
                     {
                         Log($"[保存] 中止：规则 [{rule.Name}] 解除带宽校验失败 -> {releaseError}");
-                        MessageBox.Show($"规则「{rule.Name}」的抖动带宽有问题：\n\n{releaseError}",
-                                        "无法保存", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        if (interactive)
+                            MessageBox.Show($"规则「{rule.Name}」的抖动带宽有问题：\n\n{releaseError}",
+                                            "无法保存", MessageBoxButton.OK, MessageBoxImage.Warning);
                         return SaveOutcome.Aborted;
                     }
                 }
@@ -375,8 +379,9 @@ public partial class MainWindow : Window, IDisposable
                         else
                         {
                             Log($"[保存] 中止：规则 [{rule.Name}] {msg}");
-                            MessageBox.Show($"规则「{rule.Name}」有个动作的通道号超出这台设备的通道数：\n\n{msg}\n\n本次没有保存。",
-                                            "无法保存", MessageBoxButton.OK, MessageBoxImage.Warning);
+                            if (interactive)
+                                MessageBox.Show($"规则「{rule.Name}」有个动作的通道号超出这台设备的通道数：\n\n{msg}\n\n本次没有保存。",
+                                                "无法保存", MessageBoxButton.OK, MessageBoxImage.Warning);
                             return SaveOutcome.Aborted;
                         }
                     }
