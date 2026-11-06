@@ -1,4 +1,4 @@
-﻿# Simple install script - no build, just install
+# Simple install script - no build, just install
 param(
     [string]$ServicePath = "E:\ClaudeCode\EWeLinkLinker\publish\Service\EWeLinkLinker.Service.exe"
 )
@@ -70,6 +70,14 @@ try {
         -ErrorAction Stop
 
     Write-Host "Service installed!" -ForegroundColor Green
+
+    # 崩溃恢复：不配的话服务进程崩了 SCM 不会拉起，联动规则静默失效
+    $scFailure = & sc.exe failure $serviceName reset= 86400 actions= restart/5000/restart/15000/restart/60000 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "WARNING: 配置崩溃恢复失败（退出码 $LASTEXITCODE）：$scFailure" -ForegroundColor Yellow
+    } else {
+        Write-Host "Crash recovery configured (restart 5s / 15s / 60s)." -ForegroundColor Green
+    }
 
     # Start，然后按真状态说话：以前这里 -ErrorAction SilentlyContinue 之后无条件打印
     # "Service started."，服务其实没起来也照样说起来了

@@ -16,7 +16,11 @@ public class TimeTrigger : OptimizedTriggerBase
     public override string Type => "time";
     public override string DisplayName => "每天固定时间";
 
-    protected override TimeSpan PollingInterval => TimeSpan.FromSeconds(30);
+    /// <summary>
+    /// 每日触发窗口的下限：全局轮询间隔很小时窗口也不会短于这个值，
+    /// 免得一次轮询抖动就错过当天的触发点。
+    /// </summary>
+    private static readonly TimeSpan DailyWindowFloor = TimeSpan.FromSeconds(30);
 
     /// <summary>
     /// 到点也是事件：命中之后把状态保持到既有的有效窗口结束，让 AND 里其它条件（温度/使用率）
@@ -35,7 +39,7 @@ public class TimeTrigger : OptimizedTriggerBase
         {
             var global = GlobalPollingInterval ?? TimeSpan.Zero;
             var twiceGlobal = TimeSpan.FromTicks(global.Ticks * 2);
-            return twiceGlobal > PollingInterval ? twiceGlobal : PollingInterval;
+            return twiceGlobal > DailyWindowFloor ? twiceGlobal : DailyWindowFloor;
         }
     }
 

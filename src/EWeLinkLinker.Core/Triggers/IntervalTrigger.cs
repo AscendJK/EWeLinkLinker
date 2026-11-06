@@ -27,8 +27,6 @@ public class IntervalTrigger : OptimizedTriggerBase
     /// <summary>节拍键（条件 Id|间隔）。测试用来确认 RuleTrigger 真的把条件下发下来了。</summary>
     internal string TickKey => _tickKey;
 
-    protected override TimeSpan PollingInterval => TimeSpan.FromMinutes(1);
-
     public IntervalTrigger(TriggerConfig config) : base()
     {
         if (!ValidateParameter(config.Parameter, out var error))

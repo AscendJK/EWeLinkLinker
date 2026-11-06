@@ -22,8 +22,6 @@ public class CpuTempTrigger : OptimizedTriggerBase
     public override string Type => "cpu_temp";
     public override string DisplayName => "CPU温度";
 
-    protected override TimeSpan PollingInterval => TimeSpan.FromSeconds(10);
-
     public CpuTempTrigger(TriggerConfig config) : base()
     {
         _parameter = config.Parameter;

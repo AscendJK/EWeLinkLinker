@@ -1491,6 +1491,13 @@ public partial class MainWindow : Window, IDisposable
             // 3. 设置描述（不影响能不能跑，失败只记一笔）
             var descCode = await RunScCommand($"description {ServiceName} \"Automatically controls eWeLink devices based on PC power events\"", true);
 
+            // 3.5 崩溃恢复：不配的话服务进程崩了 SCM 什么都不做，服务一直停在 Stopped，
+            // 所有规则静默失效。5s → 15s → 60s 三次重启，24 小时无故障后计数清零。
+            var failCode = await RunScCommand(
+                $"failure {ServiceName} reset= 86400 actions= restart/5000/restart/15000/restart/60000", true);
+            if (failCode != 0)
+                Log($"[安装] 警告：配置崩溃恢复失败（sc failure 退出码 {failCode}），服务崩溃后不会自动拉起");
+
             // 4. 启动服务
             Log($"安装服务: 启动服务...");
             var startCode = await RunScCommand($"start {ServiceName}", true);

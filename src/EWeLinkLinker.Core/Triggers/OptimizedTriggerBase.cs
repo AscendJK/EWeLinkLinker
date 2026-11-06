@@ -84,10 +84,11 @@ public abstract class OptimizedTriggerBase : ITrigger
     /// </summary>
     internal void ConsumePulse() => _pulseSinceUtc = null;
 
-    /// <summary>
-    /// 统一的轮询间隔（由 TriggerManager 控制）
-    /// </summary>
-    protected virtual TimeSpan PollingInterval => TimeSpan.FromSeconds(10);
+    // 没有"每个触发器自己的节奏"这回事：PollingScheduler 只用**一个**定时器，按全局
+    // pollingIntervalSeconds（配置里那个 1–30 秒的下拉）把所有触发器统一刷一遍。
+    // 这里曾经有 7 个 `protected override TimeSpan PollingInterval`（app 3s / 温度 10s /
+    // 间隔 1min …），全是没人读的死属性，唯一真正读它的是 TimeTrigger 的每日窗口。
+    // 要做独立节奏得改调度器按"下次到期时间"排程，而不是加回一个没人读的属性。
 
     /// <summary>
     /// 子类实现具体逻辑，评估当前条件是否满足

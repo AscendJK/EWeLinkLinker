@@ -32,8 +32,6 @@ public class GpuTempTrigger : OptimizedTriggerBase
     public override string Type => "gpu_temp";
     public override string DisplayName => "GPU温度";
 
-    protected override TimeSpan PollingInterval => TimeSpan.FromSeconds(10);
-
     public GpuTempTrigger(TriggerConfig config) : base()
     {
         _parameter = config.Parameter;

@@ -153,6 +153,19 @@ try {
         -ErrorAction Stop
 
     Write-Host "Service installed successfully!" -ForegroundColor Green
+
+    # 崩溃恢复：SCM 默认在服务进程异常终止后**什么都不做**，服务会一直停在 Stopped，
+    # 所有联动规则静默失效（实测未配置时 sc qfailure 三项全空）。
+    # 5s → 15s → 60s 三次重启；reset= 86400 表示 24 小时无故障后计数清零
+    # （reset= 0 是"永不重置"，偶发崩溃会一直累计）。
+    $scFailure = & sc.exe failure $serviceName reset= 86400 actions= restart/5000/restart/15000/restart/60000 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "WARNING: 配置崩溃恢复失败（退出码 $LASTEXITCODE）：$scFailure" -ForegroundColor Yellow
+        Write-Host "         服务崩溃后不会自动拉起。手工重试：" -ForegroundColor Yellow
+        Write-Host "         sc.exe failure $serviceName reset= 86400 actions= restart/5000/restart/15000/restart/60000" -ForegroundColor Yellow
+    } else {
+        Write-Host "Crash recovery configured (restart 5s / 15s / 60s, reset 24h)." -ForegroundColor Green
+    }
 }
 catch {
     Write-Host "ERROR: Failed to install service: $_" -ForegroundColor Red

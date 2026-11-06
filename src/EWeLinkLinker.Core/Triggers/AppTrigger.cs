@@ -16,8 +16,6 @@ public class AppStartTrigger : OptimizedTriggerBase
     public override string Type => "app_start";
     public override string DisplayName => "应用启动";
 
-    protected override TimeSpan PollingInterval => TimeSpan.FromSeconds(3);
-
     /// <summary>
     /// 进程启动是事件，不是持续状态：待决窗口给复合条件里其它轮询条件（温度、使用率）留出追赶上来的时间。
     /// 起游戏后 CPU/GPU 温度通常还要几十秒才爬过阈值，窗口太短就等于这条 AND 规则永远不成立。
@@ -309,8 +307,6 @@ public class AppCloseTrigger : OptimizedTriggerBase
 
     public override string Type => "app_close";
     public override string DisplayName => "应用关闭";
-
-    protected override TimeSpan PollingInterval => TimeSpan.FromSeconds(3);
 
     /// <summary>与 app_start 同理：关闭是事件，留一个窗口给其它条件赶上来。</summary>
     protected override TimeSpan PulseWindow => TimeSpan.FromSeconds(60);
