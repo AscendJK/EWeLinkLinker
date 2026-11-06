@@ -10,7 +10,6 @@ public abstract class OptimizedTriggerBase : ITrigger
 {
     private TriggerState _state = TriggerState.Idle;
     private bool _disposed;
-    private CancellationTokenSource? _resetCts;
     private int _errorRounds;
 
     /// <summary>
@@ -96,12 +95,6 @@ public abstract class OptimizedTriggerBase : ITrigger
     protected abstract ValueTask<bool> EvaluateCoreAsync(CancellationToken ct);
 
     /// <summary>
-    /// 触发后是否自动复位为 Monitoring。
-    /// 边沿检测型触发器应返回 false，避免 OnPollingComplete 错过触发状态。
-    /// </summary>
-    protected virtual bool AutoReset => false;
-
-    /// <summary>
     /// 轮询检查（测试按钮和服务端统一调用）
     /// </summary>
     public async Task<bool> PollAsync(CancellationToken ct = default)
@@ -128,31 +121,6 @@ public abstract class OptimizedTriggerBase : ITrigger
             if (triggered && wasMonitoring)
             {
                 State = TriggerState.Triggered;
-
-                if (AutoReset)
-                {
-                    // H-1 修复：安全取消并复用 CTS
-                    var oldCts = _resetCts;
-                    var newCts = new CancellationTokenSource();
-                    _resetCts = newCts;
-
-                    // 取消旧任务
-                    try { oldCts?.Cancel(); } catch { }
-                    try { oldCts?.Dispose(); } catch { }
-
-                    // 自动复位：等待一段时间后复位状态
-                    _ = Task.Run(async () =>
-                    {
-                        try
-                        {
-                            await Task.Delay(1000, newCts.Token).ConfigureAwait(false);
-                            if (!_disposed && State == TriggerState.Triggered)
-                                State = TriggerState.Monitoring;
-                        }
-                        catch (OperationCanceledException) { }
-                        catch (Exception) { /* H-10 修复：不吞致命异常 */ }
-                    });
-                }
             }
 
             // 事件型条件（app 启动/关闭、到点）：事件发生后 Triggered 不跟着"这一轮满不满足"走，
@@ -207,10 +175,6 @@ public abstract class OptimizedTriggerBase : ITrigger
     {
         if (_disposed) return;
         _disposed = true;
-        // 取消复位任务，防止访问已 Dispose 对象
-        _resetCts?.Cancel();
-        _resetCts?.Dispose();
-        _resetCts = null;
         Stop();
         OnDispose();
         StateChanged = null; // 断开事件订阅链

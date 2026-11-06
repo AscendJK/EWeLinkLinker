@@ -396,6 +396,23 @@ public partial class MainWindow : Window, IDisposable
             // 加载现有配置以保留 LoggingEnabled 等设置
             var existingConfig = LinkerConfig.Load(_configPath);
 
+            // 启动时配置一时读不到（被杀软/服务占用、半截写入）会把 _configLoadFailed 置位，
+            // 之后本会话所有保存都会被拒。用户把问题修好后不该只能重启——这里先试着重读一次，
+            // 读得动就解除封锁（文件确实不存在或解析失败则维持原状）。
+            if (_configLoadFailed && File.Exists(_configPath))
+            {
+                try
+                {
+                    var probe = LinkerConfig.Load(_configPath);
+                    if (probe != null && (probe.Rules.Count > 0 || probe.Devices.Count > 0))
+                    {
+                        _configLoadFailed = false;
+                        Log("[保存] 配置已可读，解除本会话的保存封锁");
+                    }
+                }
+                catch { /* 还是读不动：维持封锁 */ }
+            }
+
             // 保存是"整份重建再覆盖"，所以先问一句：内存里这份会不会比磁盘少（加载残缺、云端漏返回）
             var decision = ConfigSafety.Evaluate(_configLoadFailed, _rules.Count, existingConfig.Rules.Count,
                                                  _allDevices.Count, existingConfig.Devices.Count);
@@ -528,7 +545,10 @@ public partial class MainWindow : Window, IDisposable
         {
             Log($"[保存] 错误: {ex.Message}");
             Log($"[保存] 堆栈: {ex.StackTrace}");
-            MessageBox.Show($"保存失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
+            // 关窗自动保存（interactive:false）不能弹框：那只是他想关窗口，
+            // 弹出模态错误框会把关闭卡住。日志里留痕就够了。
+            if (interactive)
+                MessageBox.Show($"保存失败: {ex.Message}", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
             return SaveOutcome.Aborted;
         }
     }
@@ -1140,27 +1160,6 @@ public partial class MainWindow : Window, IDisposable
     }
 
     /// <summary>
-    /// 数字输入框失去焦点时更新 Parameter
-    /// </summary>
-    private void NumericTextBox_LostFocus(object sender, RoutedEventArgs e)
-    {
-        if (sender is TextBox textBox && textBox.DataContext is RuleCondition condition)
-        {
-            // 尝试解析数字（按不变文化：跟着系统区域走的话 "2,5" 会被当成千分位读成 25）
-            if (int.TryParse(textBox.Text, System.Globalization.NumberStyles.Integer,
-                    System.Globalization.CultureInfo.InvariantCulture, out var value))
-            {
-                condition.Parameter = value.ToString(System.Globalization.CultureInfo.InvariantCulture);
-                Log($"数值条件更新: {condition.Parameter}");
-            }
-            else
-            {
-                Log($"[输入] \"{textBox.Text}\" 不是整数，这一条没写进规则（{ComparisonHelper.NumberFormatHint(textBox.Text)}）");
-            }
-        }
-    }
-
-    /// <summary>
     /// 测试触发条件是否满足（使用与服务端相同的 PollAsync）
     /// </summary>
     private async void TestCondition_Click(object sender, RoutedEventArgs e)
@@ -1410,19 +1409,6 @@ public partial class MainWindow : Window, IDisposable
         }
     }
 
-
-    private void DeviceCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (sender is ComboBox combo && combo.DataContext is LinkerAction action)
-        {
-            if (combo.SelectedItem is DeviceInfo device)
-            {
-                action.DeviceId = device.DeviceId;
-                action.Name = device.Name;
-                Log($"选择设备: {device.Name} ({device.DeviceId})");
-            }
-        }
-    }
 
     private void Log(string message)
     {

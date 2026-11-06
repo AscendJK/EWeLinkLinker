@@ -14,8 +14,6 @@
         <!-- Converters -->
         <BooleanToVisibilityConverter x:Key="BoolToVis"/>
         <local:InverseBoolToVisibilityConverter x:Key="InverseBoolToVis"/>
-        <local:BoolToStringConverter x:Key="BoolToText" TrueValue="是" FalseValue="否"/>
-        <local:StatusToBrushConverter x:Key="StatusToBrush"/>
         <local:ComparisonToDisplayConverter x:Key="ComparisonToDisplayConverter"/>
         <local:ChannelListConverter x:Key="ChannelList"/>
 

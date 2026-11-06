@@ -376,16 +376,6 @@ public class LinkerWindowsService : ServiceBase
     }
 
     /// <summary>
-    /// 判断是否为电源事件
-    /// </summary>
-    private static bool IsPowerEvent(string? eventName) =>
-        !string.IsNullOrEmpty(eventName) &&
-        (eventName.Equals("boot", StringComparison.OrdinalIgnoreCase) ||
-         eventName.Equals("shutdown", StringComparison.OrdinalIgnoreCase) ||
-         eventName.Equals("sleep", StringComparison.OrdinalIgnoreCase) ||
-         eventName.Equals("wake", StringComparison.OrdinalIgnoreCase));
-
-    /// <summary>
     /// 检查系统是否在近期启动（2分钟内），用于区分开机启动和手动启动
     /// </summary>
     private static bool IsSystemRecentlyBooted()
@@ -445,6 +435,9 @@ public class LinkerWindowsService : ServiceBase
             _logger.Dispose();
         }
         catch { }
+
+        // 关掉 detail/AUDIT 那支日志的文件句柄（它没有 Dispose 入口，只有这个 Shutdown）
+        try { Core.Logging.SimpleLogger.Shutdown(); } catch { }
 
         // C-5 修复：OnStop 也释放 HttpClient（服务停止时可能非关机）
         var httpClient = System.Threading.Interlocked.Exchange(ref _sharedHttpClient, null!);
@@ -512,6 +505,9 @@ public class LinkerWindowsService : ServiceBase
             // 使用 Interlocked.Exchange 确保只 Dispose 一次
             var httpClient = System.Threading.Interlocked.Exchange(ref _sharedHttpClient, null!);
             httpClient?.Dispose();
+            // 关机路径不 Dispose _logger（队列里的行会被进程结束吞掉），
+            // 但 detail/AUDIT 那支是同步写的，关掉句柄能保证最后几行落盘
+            try { Core.Logging.SimpleLogger.Shutdown(); } catch { }
             base.OnShutdown();
         }
     }

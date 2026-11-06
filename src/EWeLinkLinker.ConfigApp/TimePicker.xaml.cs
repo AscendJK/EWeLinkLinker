@@ -28,7 +28,9 @@ public partial class TimePicker : UserControl
     private void InitTimeComboBoxes()
     {
         HoursCombo.ItemsSource = Enumerable.Range(0, 24).Select(i => i.ToString("D2"));
-        MinutesCombo.ItemsSource = new[] { "00", "05", "10", "15", "20", "25", "30", "35", "40", "45", "50", "55" };
+        // 分钟给全部 60 档。以前只有 5 分钟一档：配置里存着 08:07 时 SelectedItem 落空、
+        // 分钟那格显示空白，而 UpdateValue 要求两个都非 null —— 用户改小时会被静默丢弃。
+        MinutesCombo.ItemsSource = Enumerable.Range(0, 60).Select(i => i.ToString("D2"));
     }
 
     /// <summary>
@@ -77,8 +79,9 @@ public partial class TimePicker : UserControl
 
     private void OnComboChanged(object? sender, SelectionChangedEventArgs e)
     {
-        // 初始化期间或隐藏时不更新源
-        if (_isInitializing || Visibility != Visibility.Visible) return;
+        // 用 IsVisible 而不是 Visibility：控件自身的 Visibility 在父面板整体隐藏时仍然是 Visible，
+        // 那个判断等于没写（时间条件被类型切换隐藏期间照样会回写）。
+        if (_isInitializing || !IsVisible) return;
         UpdateValue();
     }
 

@@ -6,47 +6,6 @@ using EWeLinkLinker.Core.Models;
 
 namespace EWeLinkLinker.ConfigApp;
 
-public class BoolToStringConverter : System.Windows.Data.IValueConverter
-{
-    public string TrueValue { get; set; } = "是";
-    public string FalseValue { get; set; } = "否";
-
-    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
-    {
-        if (value is bool boolValue)
-            return boolValue ? TrueValue : FalseValue;
-        if (value is bool?)
-            return FalseValue;
-        return FalseValue;
-    }
-
-    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
-    {
-        throw new NotImplementedException();
-    }
-}
-
-/// <summary>
-/// 将在线状态转换为颜色画笔：true=绿色, false=灰色
-/// </summary>
-public class StatusToBrushConverter : IValueConverter
-{
-    private static readonly Brush SuccessBrush = new SolidColorBrush(Color.FromRgb(0x4C, 0xAF, 0x50)); // #4CAF50
-    private static readonly Brush OfflineBrush = new SolidColorBrush(Color.FromRgb(0x9E, 0x9E, 0x9E)); // #9E9E9E
-
-    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
-    {
-        if (value is bool isOnline && isOnline)
-            return SuccessBrush;
-        return OfflineBrush;
-    }
-
-    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
-    {
-        throw new NotImplementedException();
-    }
-}
-
 /// <summary>
 /// 布尔值反转转 Visibility（true=Collapsed, false=Visible）
 /// </summary>

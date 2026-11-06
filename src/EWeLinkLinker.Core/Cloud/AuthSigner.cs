@@ -19,12 +19,4 @@ public static class AuthSigner
         return Convert.ToBase64String(hash);
     }
 
-    /// <summary>
-    /// Build Authorization header value: "Sign {signature}"
-    /// </summary>
-    public static string BuildAuthorizationHeader(string body, string appSecret)
-    {
-        var signature = Sign(body, appSecret);
-        return $"Sign {signature}";
-    }
 }

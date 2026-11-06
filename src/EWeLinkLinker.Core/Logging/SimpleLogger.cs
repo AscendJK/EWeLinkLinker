@@ -69,6 +69,24 @@ public static class SimpleLogger
     }
 
     /// <summary>
+    /// 关闭底层文件句柄。服务停止时调用。
+    ///
+    /// 进程退出时系统会回收句柄，但控制台模式、或同进程 Stop→Start 时，
+    /// 不关就会一直绑在"启动那天"的文件名上（跨零点也不会重新按当天日期初始化）；
+    /// 停止后也没有任何东西再往里写，句柄白占着。
+    /// </summary>
+    public static void Shutdown()
+    {
+        lock (LogLock)
+        {
+            try { _writer?.Dispose(); } catch { }
+            _writer = null;
+            _logPath = null;
+            _writerDate = DateTime.MinValue;
+        }
+    }
+
+    /// <summary>
     /// Write a log message with timestamp.
     /// </summary>
     public static void Log(string message)

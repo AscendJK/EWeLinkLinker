@@ -228,6 +228,9 @@ public class LanClient
         }
 
         await Task.WhenAll(tasks);
+        // 这个计数原来只增不读（死状态）。打出来才有用：能区分"网段选错了（0 台应答）"
+        // 和"网段对但设备都不在线"，排障时是两条完全不同的结论。
+        SimpleLogger.Log($"[Discovery] ping 扫段 {subnet}.0/24: {Volatile.Read(ref successCount)} 台有应答");
         await Task.Delay(300);
     }
 
