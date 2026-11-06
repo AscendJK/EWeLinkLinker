@@ -96,7 +96,7 @@ public class LinkerService
 
             // 混合规则（电源事件 + 轮询条件）：事件触发时实时评估非电源条件，
             // 全部满足才执行动作，避免轮询条件被静默忽略
-            if (!await EvaluateRuleConditionsOnEventAsync(rule, ct))
+            if (!await EvaluateRuleConditionsOnEventAsync(rule, ct, eventName))
             {
                 Log($"  Rule '{rule.Name}': 条件未满足，跳过");
                 continue;
@@ -118,11 +118,14 @@ public class LinkerService
 
     /// <summary>
     /// 事件触发时评估规则条件：
-    /// - 电源条件已由事件匹配，视为满足（不阻塞）
+    /// - 只有"与本次事件同名"的电源条件算满足；同一条规则里别的电源条件算不满足
+    ///   （原来无条件把**所有**电源条件当满足，`wake AND sleep` 这种规则被任一事件白送一次）
     /// - 非电源条件用临时触发器实时评估一次（先 Start 播种初始状态，语义与轮询一致）
-    /// - 分组语义与 RuleTrigger.EvaluateCompositeCondition 一致：AND > OR
+    /// - 分组语义走 CompositeRuleEvaluator，与轮询路径共用同一份实现
+    /// 对测试可见（internal）：这是"事件条件怎么和状态条件组合"的唯一落点，值得单测。
     /// </summary>
-    private async Task<bool> EvaluateRuleConditionsOnEventAsync(LinkerRule rule, CancellationToken ct)
+    internal async Task<bool> EvaluateRuleConditionsOnEventAsync(LinkerRule rule, CancellationToken ct,
+                                                                 string eventName = "")
     {
         var conditions = rule.Conditions;
         if (conditions.Count == 0) return true;
@@ -139,7 +142,9 @@ public class LinkerService
                 var condition = conditions[i];
                 if (TriggerManager.IsPowerCondition(condition.Type))
                 {
-                    results[i] = true; // 电源条件已由事件匹配
+                    // 只有"与本次事件同名"的那一个算满足；同一条规则里别的电源条件算不满足。
+                    // 原来无条件置 true，`wake AND sleep` 这种规则会被任意一端的事件白送一次动作。
+                    results[i] = string.Equals(condition.Type, eventName, StringComparison.OrdinalIgnoreCase);
                     continue;
                 }
 
@@ -180,33 +185,8 @@ public class LinkerService
                 }
             }
 
-            // 与 RuleTrigger.EvaluateCompositeCondition 一致：按 OR 分组，组内 AND，组间 OR
-            if (conditions.Count == 1) return results[0];
-
-            var groups = new List<List<int>>();
-            var currentGroup = new List<int> { 0 };
-            for (int i = 1; i < conditions.Count; i++)
-            {
-                if (conditions[i].Operator == LogicalOperator.Or)
-                {
-                    groups.Add(currentGroup);
-                    currentGroup = new List<int> { i };
-                }
-                else
-                {
-                    currentGroup.Add(i);
-                }
-            }
-            groups.Add(currentGroup);
-
-            foreach (var group in groups)
-            {
-                bool groupResult = true;
-                foreach (var idx in group)
-                    groupResult = groupResult && results[idx];
-                if (groupResult) return true;
-            }
-            return false;
+            // 与轮询路径共用同一份分组算法，避免两处判据漂移
+            return CompositeRuleEvaluator.Evaluate(rule, results);
         }
         finally
         {

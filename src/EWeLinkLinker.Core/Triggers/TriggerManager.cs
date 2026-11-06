@@ -56,11 +56,12 @@ public sealed class TriggerManager : IAsyncDisposable
                 continue;
             }
 
-            // 跳过含电源事件条件的规则（由 LinkerService 系统事件处理：
-            // 纯电源规则在事件触发时直接执行；混合规则在事件触发时评估其余非电源条件）
-            if (rule.Conditions.Any(c => IsPowerCondition(c.Type)))
+            // 纯电源事件规则（没有任何可轮询条件）不进轮询：由 LinkerService 的系统事件路径处理。
+            // 混合规则（电源条件 + 温度/进程/时间…）**必须**进轮询，否则它的非电源分支永远不生效——
+            // `boot OR app_start` 里的 app_start 就是因为整条被踢出轮询而从不触发。
+            if (rule.Conditions.All(c => IsPowerCondition(c.Type)))
             {
-                _logger.Info($"规则 [{rule.Name}] 包含电源事件条件，跳过轮询（由系统事件处理）");
+                _logger.Info($"规则 [{rule.Name}] 的条件全部是电源事件，跳过轮询（由系统事件处理）");
                 continue;
             }
 
@@ -103,6 +104,12 @@ public sealed class TriggerManager : IAsyncDisposable
         // 记录加载摘要
         _logger.LogRulesLoaded(rules.Count, activeRules, totalConditions, totalActions);
     }
+
+    /// <summary>
+    /// 已装载的规则触发器（只读快照）。测试用来断言"这条规则到底有没有进轮询"，
+    /// 生产代码不依赖它。
+    /// </summary>
+    internal IReadOnlyCollection<RuleTrigger> RuleTriggers => _ruleTriggers.Values;
 
     /// <summary>
     /// 启动所有触发器

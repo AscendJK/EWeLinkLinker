@@ -26,6 +26,12 @@ public sealed class RuleTrigger : IDisposable, IPostPollCallback
     private readonly ServiceLogger _logger;
     private readonly PollingScheduler _scheduler;
     private readonly List<OptimizedTriggerBase> _conditionTriggers = new();
+
+    /// <summary>
+    /// <see cref="_conditionTriggers"/> 里第 k 个监控器对应 <c>_rule.Conditions</c> 的哪个下标。
+    /// 电源事件条件（boot/shutdown/sleep/wake）不可轮询，不进这个列表——所以两者不再能按下标直接对齐。
+    /// </summary>
+    private readonly List<int> _conditionIndexes = new();
     private readonly object _evalLock = new();  // H-17 修复：保护 _previousCompositeResult 读写
     private bool _disposed;
     private bool _previousCompositeResult; // 防重复触发
@@ -68,20 +74,30 @@ public sealed class RuleTrigger : IDisposable, IPostPollCallback
         _scheduler = scheduler;
         _executeActions = executeActions;
         _logTriggered = logTriggered;
+        // 可轮询条件的位置表：电源事件条件被排除在外
+        for (var i = 0; i < rule.Conditions.Count; i++)
+        {
+            if (!TriggerManager.IsPowerCondition(rule.Conditions[i].Type)) _conditionIndexes.Add(i);
+        }
+
         if (presets != null)
         {
-            if (presets.Count != rule.Conditions.Count)
+            if (presets.Count != _conditionIndexes.Count)
                 throw new ArgumentException(
-                    $"预置条件触发器数量 ({presets.Count}) 与规则条件数 ({rule.Conditions.Count}) 不一致", nameof(presets));
+                    $"预置条件触发器数量 ({presets.Count}) 与可轮询条件数 ({_conditionIndexes.Count}) 不一致", nameof(presets));
             _conditionTriggers.AddRange(presets);
         }
     }
 
     public async Task InitializeAsync()
     {
-        // 为每个条件创建触发器
-        foreach (var condition in _rule.Conditions)
+        // 只为"可轮询"的条件创建监控器：电源事件条件由 LinkerWindowsService 的系统事件路径处理，
+        // 在这里建会直接抛 "Unknown trigger type: boot"。
+        for (var index = 0; index < _rule.Conditions.Count; index++)
         {
+            var condition = _rule.Conditions[index];
+            if (TriggerManager.IsPowerCondition(condition.Type)) continue;
+
             var config = new TriggerConfig
             {
                 Type = condition.Type,
@@ -92,9 +108,13 @@ public sealed class RuleTrigger : IDisposable, IPostPollCallback
             };
             var trigger = TriggerRegistry.Create(config);
             _conditionTriggers.Add(trigger);
+            _conditionIndexes.Add(index);
         }
 
-        _logger.Info($"规则 [{_rule.Name}] 初始化完成: {_conditionTriggers.Count} 个条件监控器");
+        _logger.Info($"规则 [{_rule.Name}] 初始化完成: {_conditionTriggers.Count} 个条件监控器" +
+                     (_conditionTriggers.Count < _rule.Conditions.Count
+                         ? $"（另有 {_rule.Conditions.Count - _conditionTriggers.Count} 个电源事件条件，由系统事件路径处理）"
+                         : ""));
     }
 
     public IReadOnlyList<OptimizedTriggerBase> GetTriggers() => _conditionTriggers.AsReadOnly();
@@ -136,17 +156,21 @@ public sealed class RuleTrigger : IDisposable, IPostPollCallback
                 currentResult = false;
             }
 
-            var states = string.Join(", ", _conditionTriggers.Select((t, i) =>
-                $"{_rule.Conditions[i].Type}={t.State}"));
+            var conditionResults = CurrentStates();
+            var stateParts = new List<string>(_rule.Conditions.Count);
+            for (var i = 0; i < _rule.Conditions.Count; i++)
+            {
+                stateParts.Add(TriggerManager.IsPowerCondition(_rule.Conditions[i].Type)
+                    ? $"{_rule.Conditions[i].Type}=事件型"
+                    : $"{_rule.Conditions[i].Type}={_conditionTriggers[_conditionIndexes.IndexOf(i)].State}");
+            }
+            var states = string.Join(", ", stateParts);
             _logger.Info($"[RuleTrigger:{_rule.Name}] {states} => {(currentResult ? "满足" : "不满足")}");
             // 边沿检测：只在从"不满足"变为"满足"时触发
             if (currentResult && !_previousCompositeResult)
             {
                 var reason = string.Join(", ", _rule.Conditions.Select((c, i) =>
-                {
-                    var state = _conditionTriggers[i].State == TriggerState.Triggered ? "满足" : "不满足";
-                    return $"{c.Type}={c.Parameter}({state})";
-                }));
+                    $"{c.Type}={c.Parameter}({(conditionResults[i] ? "满足" : "不满足")})"));
 
                 // 上一批动作还在跑就再发一批：两条队列会交错写同一个插座，后发的那批
                 // 可能把前一批刚设好的状态改回去（口径 A：跳过这一发并记日志）。
@@ -237,46 +261,25 @@ public sealed class RuleTrigger : IDisposable, IPostPollCallback
     }
 
     /// <summary>
-    /// 评估复合条件（返回当前是否满足）
-    /// 支持标准布尔优先级：AND > OR
+    /// 当前每个条件的判定结果（下标与 <c>_rule.Conditions</c> 对齐）。
+    /// 电源事件条件不可轮询，在轮询路径里恒为 false —— 这正是 `boot OR app_start` 这类规则
+    /// 的 OR 分支能被正常评估、而 `boot AND xxx` 不会被误判成立的原因。
     /// </summary>
-    private bool EvaluateCompositeCondition()
+    private bool[] CurrentStates()
     {
-        if (_conditionTriggers.Count == 0) return false;
-        if (_conditionTriggers.Count == 1)
-            return _conditionTriggers[0].State == TriggerState.Triggered;
-
-        // 按 OR 分组，每组内 AND 运算
-        var groups = new List<List<int>>();
-        var currentGroup = new List<int> { 0 };
-
-        for (int i = 1; i < _conditionTriggers.Count; i++)
+        var results = new bool[_rule.Conditions.Count];
+        for (var k = 0; k < _conditionTriggers.Count; k++)
         {
-            if (_rule.Conditions[i].Operator == LogicalOperator.Or)
-            {
-                groups.Add(currentGroup);
-                currentGroup = new List<int> { i };
-            }
-            else
-            {
-                currentGroup.Add(i);
-            }
+            results[_conditionIndexes[k]] = _conditionTriggers[k].State == TriggerState.Triggered;
         }
-        groups.Add(currentGroup);
-
-        // 每组内 AND 运算，组间 OR 运算
-        foreach (var group in groups)
-        {
-            bool groupResult = true;
-            foreach (var idx in group)
-            {
-                groupResult = groupResult && (_conditionTriggers[idx].State == TriggerState.Triggered);
-            }
-            if (groupResult) return true;
-        }
-
-        return false;
+        return results;
     }
+
+    /// <summary>
+    /// 评估复合条件（返回当前是否满足）。分组算法在 <see cref="CompositeRuleEvaluator"/>，
+    /// 与电源事件路径共用同一份实现。
+    /// </summary>
+    private bool EvaluateCompositeCondition() => CompositeRuleEvaluator.Evaluate(_rule, CurrentStates());
 
     public void Dispose()
     {
