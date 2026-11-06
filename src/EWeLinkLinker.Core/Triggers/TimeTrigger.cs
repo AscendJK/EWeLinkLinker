@@ -12,12 +12,18 @@ public class TimeTrigger : OptimizedTriggerBase
     private readonly TimeSpan _time;
     private readonly ComparisonOperator _comparison;
     private DateTime _lastTriggeredDate;
-    private bool _wasTriggered;
 
     public override string Type => "time";
     public override string DisplayName => "每天固定时间";
 
     protected override TimeSpan PollingInterval => TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// 到点也是事件：命中之后把状态保持到既有的有效窗口结束，让 AND 里其它条件（温度/使用率）
+    /// 在这段窗口内赶上来，而不是要求两者落在同一拍。窗口与"每日触发窗口"用同一个值，
+    /// 语义不变——仍然是每天最多一次，只是不再要求同一轮询周期。
+    /// </summary>
+    protected override TimeSpan PulseWindow => EffectiveWindow;
 
     /// <summary>
     /// 有效触发窗口：至少覆盖两个全局轮询间隔（30s 全局间隔时窗口为 60s），
@@ -44,8 +50,7 @@ public class TimeTrigger : OptimizedTriggerBase
 
     protected override void OnStart()
     {
-        // H-? 修复：Stop/Start 或热重载后复位锁存状态，确保当天可再次触发
-        _wasTriggered = false;
+        // Stop/Start 或热重载后复位"今天已触发"的记账，确保当天可再次触发
         _lastTriggeredDate = DateTime.MinValue;
     }
 
@@ -85,8 +90,8 @@ public class TimeTrigger : OptimizedTriggerBase
         var now = DateTime.Now;
         var today = now.Date;
 
-        // 根据比较运算符判断
-        var triggered = _comparison switch
+        // 根据比较运算符判断（各 Check 内部用 _lastTriggeredDate 保证每天最多命中一次）
+        var matched = _comparison switch
         {
             ComparisonOperator.Eq => EqCheck(now, today),
             ComparisonOperator.Neq => NeqCheck(now, today),
@@ -95,18 +100,12 @@ public class TimeTrigger : OptimizedTriggerBase
             _ => false
         };
 
-        // 边沿检测：从未满足变为满足时触发
-        if (triggered && !_wasTriggered)
+        // 命中即产生待决事件；状态由基类按脉冲窗口保持到窗口结束或被规则消费，
+        // 不再"这一轮结束就复位"——那会让 time AND cpu_temp 这种规则要求两者同拍。
+        if (matched && !PulsePending)
         {
-            _wasTriggered = true;
+            RaisePulse();
             return ValueTask.FromResult(true);
-        }
-
-        // 条件不满足，复位锁存和状态
-        if (!triggered && _wasTriggered)
-        {
-            _wasTriggered = false;
-            State = TriggerState.Monitoring;
         }
 
         return ValueTask.FromResult(false);

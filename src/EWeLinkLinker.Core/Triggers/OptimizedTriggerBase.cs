@@ -52,6 +52,38 @@ public abstract class OptimizedTriggerBase : ITrigger
     /// </summary>
     internal bool LastReadingAvailable { get; set; } = true;
 
+    // ─── 事件型条件的脉冲待决（A3） ─────────────────────────────────────
+    //
+    // app_start / app_close / 到点这类条件是"事件"，不是"持续状态"。原来它们只在自己被发现的那
+    // 一个轮询周期里把 State 置成 Triggered，下一拍立刻回 Monitoring；而 RuleTrigger 的复合判定
+    // 读的是当前 State，于是 `app_start AND cpu_temp>=80` 要求两者落在同一拍（3–5 秒内）——
+    // 起游戏后温度要几十秒才爬上去，这个条件几乎永不成立，还没有任何日志说"我丢了一个事件"。
+    //
+    // 现在事件产生一个"待决脉冲"：Triggered 保持到一个窗口结束，或者被规则消费掉为止。
+
+    private DateTime? _pulseSinceUtc;
+
+    /// <summary>
+    /// 待决脉冲最多保持多久。0 = 不是事件型条件（数值型靠滞回自己管锁存）。
+    /// </summary>
+    protected virtual TimeSpan PulseWindow => TimeSpan.Zero;
+
+    /// <summary>这条触发器是不是事件型（只看窗口是否启用）。</summary>
+    internal bool IsPulseCondition => PulseWindow > TimeSpan.Zero;
+
+    /// <summary>当前是否存在一个既没被规则消费、也没过期的事件。</summary>
+    protected bool PulsePending =>
+        _pulseSinceUtc.HasValue && DateTime.UtcNow - _pulseSinceUtc.Value < PulseWindow;
+
+    /// <summary>记一次事件（子类在"这一轮真的发现了事件"时调用，并同时返回 true）。</summary>
+    protected void RaisePulse() => _pulseSinceUtc = DateTime.UtcNow;
+
+    /// <summary>
+    /// 规则把动作派发出去之后调用：同一个事件不能触发第二次。
+    /// 置空之后，下一次轮询发现 PulsePending 为 false，基类会把状态放回 Monitoring。
+    /// </summary>
+    internal void ConsumePulse() => _pulseSinceUtc = null;
+
     /// <summary>
     /// 统一的轮询间隔（由 TriggerManager 控制）
     /// </summary>
@@ -83,6 +115,12 @@ public abstract class OptimizedTriggerBase : ITrigger
 
         try
         {
+            // 每轮先按"这一轮拿到了读数"重置，只有真正读到 NaN 的子类才把它置回 false。
+            // 不在入口重置的话，time / interval / app_start / app_close 这几种从不写这个标志的
+            // 触发器只要抛过一次异常就永久停在"读数未知"：此后每次启动播种都把它们当没定论，
+            // 白跑满 3 遍 ×1.2s，还写一条"跑了 3 遍仍没读到值"的误导性 WARN。
+            LastReadingAvailable = true;
+
             var wasMonitoring = State == TriggerState.Monitoring;
             var triggered = await EvaluateCoreAsync(ct);
             _errorRounds = 0;
@@ -115,6 +153,15 @@ public abstract class OptimizedTriggerBase : ITrigger
                     });
                 }
             }
+
+            // 事件型条件（app 启动/关闭、到点）：事件发生后 Triggered 不跟着"这一轮满不满足"走，
+            // 而是挂到脉冲上——待决期间保持 Triggered，让复合条件里其它轮询条件有机会在这几轮里赶上；
+            // 被规则消费掉或超出窗口后由这里统一放开。子类只管 RaisePulse()，不用各自写复位。
+            if (IsPulseCondition && State == TriggerState.Triggered && !PulsePending)
+            {
+                State = TriggerState.Monitoring;
+            }
+
             return triggered;
         }
         catch (Exception ex)

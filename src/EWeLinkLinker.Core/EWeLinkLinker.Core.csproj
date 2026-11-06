@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
@@ -13,6 +13,11 @@
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.10" />
     <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="10.0.10" />
     <PackageReference Include="System.Management" Version="10.0.10" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 测试工程要直接驱动 internal 的判定/播种路径（LastReadingAvailable、SensorReadiness、RuleTrigger 的测试缝） -->
+    <InternalsVisibleTo Include="EWeLinkLinker.Core.Tests" />
   </ItemGroup>
 
 </Project>

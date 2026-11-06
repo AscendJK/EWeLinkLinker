@@ -12,12 +12,17 @@ public class AppStartTrigger : OptimizedTriggerBase
 {
     private readonly string _processName;
     private readonly HashSet<int> _knownProcesses = new();
-    private bool _wasTriggered;
 
     public override string Type => "app_start";
     public override string DisplayName => "应用启动";
 
     protected override TimeSpan PollingInterval => TimeSpan.FromSeconds(3);
+
+    /// <summary>
+    /// 进程启动是事件，不是持续状态：待决窗口给复合条件里其它轮询条件（温度、使用率）留出追赶上来的时间。
+    /// 起游戏后 CPU/GPU 温度通常还要几十秒才爬过阈值，窗口太短就等于这条 AND 规则永远不成立。
+    /// </summary>
+    protected override TimeSpan PulseWindow => TimeSpan.FromSeconds(60);
 
     public AppStartTrigger(TriggerConfig config) : base()
     {
@@ -46,11 +51,10 @@ public class AppStartTrigger : OptimizedTriggerBase
 
     protected override void OnStart()
     {
-        _wasTriggered = false;
         lock (_knownProcesses)
         {
             _knownProcesses.Clear();
-            var existing = FindMatchingProcessIds(_processName, SensorCache);
+            var existing = FindCurrentProcessIds();
             foreach (var id in existing)
             {
                 _knownProcesses.Add(id);
@@ -58,38 +62,36 @@ public class AppStartTrigger : OptimizedTriggerBase
         }
     }
 
+    /// <summary>
+    /// 当前匹配的进程 ID 集合。抽成虚方法只为了让测试能喂一份受控的进程表，
+    /// 不必真的去起一个进程；生产路径仍是 FindMatchingProcessIds。
+    /// </summary>
+    protected virtual List<int> FindCurrentProcessIds() => FindMatchingProcessIds(_processName, SensorCache);
+
     protected override ValueTask<bool> EvaluateCoreAsync(CancellationToken ct)
     {
         lock (_knownProcesses)
         {
             // 传入 SensorCache，同一轮轮询中共享 Process[] 数组
-            var currentIds = FindMatchingProcessIds(_processName, SensorCache);
+            var currentIds = FindCurrentProcessIds();
 
             var hasNewProcess = false;
             foreach (var id in currentIds)
             {
-                if (!_knownProcesses.Contains(id))
-                {
-                    _knownProcesses.Add(id);
-                    hasNewProcess = true;
-                }
+                if (!_knownProcesses.Contains(id)) hasNewProcess = true;
             }
 
-            // 清理已退出的进程
-            _knownProcesses.RemoveWhere(id => !currentIds.Contains(id));
+            // 更新已知集合（清理已退出的进程）
+            _knownProcesses.Clear();
+            foreach (var id in currentIds) _knownProcesses.Add(id);
 
-            // 边沿检测：发现了新进程且未触发过
-            if (hasNewProcess && !_wasTriggered)
+            // 边沿检测：新进程出现即产生一个待决事件。
+            // 已经有待决事件时不再造第二个；状态由基类按脉冲窗口保持/放开，
+            // 这里不再自己复位 State —— 那是"事件只活一个轮询周期"的老根因。
+            if (hasNewProcess && !PulsePending)
             {
-                _wasTriggered = true;
+                RaisePulse();
                 return ValueTask.FromResult(true);
-            }
-
-            // 没有新进程，复位锁存和状态
-            if (!hasNewProcess && _wasTriggered)
-            {
-                _wasTriggered = false;
-                State = TriggerState.Monitoring;
             }
         }
 
@@ -304,12 +306,14 @@ public class AppCloseTrigger : OptimizedTriggerBase
 {
     private readonly string _processName;
     private readonly HashSet<int> _trackedProcesses = new();
-    private bool _wasTriggered;
 
     public override string Type => "app_close";
     public override string DisplayName => "应用关闭";
 
     protected override TimeSpan PollingInterval => TimeSpan.FromSeconds(3);
+
+    /// <summary>与 app_start 同理：关闭是事件，留一个窗口给其它条件赶上来。</summary>
+    protected override TimeSpan PulseWindow => TimeSpan.FromSeconds(60);
 
     public AppCloseTrigger(TriggerConfig config) : base()
     {
@@ -338,11 +342,10 @@ public class AppCloseTrigger : OptimizedTriggerBase
 
     protected override void OnStart()
     {
-        _wasTriggered = false;
         lock (_trackedProcesses)
         {
             _trackedProcesses.Clear();
-            var existing = AppStartTrigger.FindMatchingProcessIds(_processName, SensorCache);
+            var existing = FindCurrentProcessIds();
             foreach (var id in existing)
             {
                 _trackedProcesses.Add(id);
@@ -350,34 +353,28 @@ public class AppCloseTrigger : OptimizedTriggerBase
         }
     }
 
+    /// <summary>同上：给测试留的进程表注入点，生产路径不变。</summary>
+    protected virtual List<int> FindCurrentProcessIds() =>
+        AppStartTrigger.FindMatchingProcessIds(_processName, SensorCache);
+
     protected override ValueTask<bool> EvaluateCoreAsync(CancellationToken ct)
     {
         lock (_trackedProcesses)
         {
-            var currentIds = AppStartTrigger.FindMatchingProcessIds(_processName, SensorCache);
+            var currentIds = FindCurrentProcessIds();
 
             // 检查哪些进程已退出
-            var exited = _trackedProcesses.Where(id => !currentIds.Contains(id)).ToList();
+            var exited = _trackedProcesses.Any(id => !currentIds.Contains(id));
 
             // 更新跟踪列表
-            _trackedProcesses.RemoveWhere(id => !currentIds.Contains(id));
-            foreach (var id in currentIds)
-            {
-                _trackedProcesses.Add(id);
-            }
+            _trackedProcesses.Clear();
+            foreach (var id in currentIds) _trackedProcesses.Add(id);
 
-            // 边沿检测：有进程退出且未触发过
-            if (exited.Count > 0 && !_wasTriggered)
+            // 边沿检测：有进程退出即产生一个待决事件；状态由基类按脉冲窗口保持/放开
+            if (exited && !PulsePending)
             {
-                _wasTriggered = true;
+                RaisePulse();
                 return ValueTask.FromResult(true);
-            }
-
-            // 没有进程退出，复位锁存和状态
-            if (exited.Count == 0 && _wasTriggered)
-            {
-                _wasTriggered = false;
-                State = TriggerState.Monitoring;
             }
         }
 

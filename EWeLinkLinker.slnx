@@ -4,4 +4,7 @@
     <Project Path="src/EWeLinkLinker.Core/EWeLinkLinker.Core.csproj" />
     <Project Path="src/EWeLinkLinker.Service/EWeLinkLinker.Service.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/EWeLinkLinker.Core.Tests/EWeLinkLinker.Core.Tests.csproj" />
+  </Folder>
 </Solution>

@@ -16,7 +16,13 @@ namespace EWeLinkLinker.Core.Triggers;
 public sealed class RuleTrigger : IDisposable, IPostPollCallback
 {
     private readonly LinkerRule _rule;
-    private readonly LinkerService _linkerService;
+    /// <summary>
+    /// 执行动作的委托。生产路径就是 LinkerService.ExecuteRuleAsync；
+    /// 抽成委托是为了让判定/派发逻辑能在没有设备、没有配置文件的测试里被驱动。
+    /// </summary>
+    private readonly Func<LinkerRule, CancellationToken, Task> _executeActions;
+    /// <summary>记 "!! 规则触发" 的委托，同样是为了可测（见 §A1：这条日志抛异常不该把 _actionInFlight 锁死）。</summary>
+    private readonly Action<string, string> _logTriggered;
     private readonly ServiceLogger _logger;
     private readonly PollingScheduler _scheduler;
     private readonly List<OptimizedTriggerBase> _conditionTriggers = new();
@@ -41,11 +47,34 @@ public sealed class RuleTrigger : IDisposable, IPostPollCallback
     private int _actionInFlight;
 
     public RuleTrigger(LinkerRule rule, LinkerService linkerService, ServiceLogger logger, PollingScheduler scheduler)
+        : this(rule, logger, scheduler,
+               (r, ct) => linkerService.ExecuteRuleAsync(r, ct),
+               logger.LogRuleTriggered,
+               presets: null)
+    {
+    }
+
+    /// <summary>
+    /// 测试用构造：条件触发器由调用方直接给（生产路径走 InitializeAsync 从 TriggerRegistry 建）。
+    /// 没有这个缝，判定/派发逻辑就只能靠真传感器驱动，等于不可测。
+    /// </summary>
+    internal RuleTrigger(LinkerRule rule, ServiceLogger logger, PollingScheduler scheduler,
+                         Func<LinkerRule, CancellationToken, Task> executeActions,
+                         Action<string, string> logTriggered,
+                         IReadOnlyList<OptimizedTriggerBase>? presets)
     {
         _rule = rule;
-        _linkerService = linkerService;
         _logger = logger;
         _scheduler = scheduler;
+        _executeActions = executeActions;
+        _logTriggered = logTriggered;
+        if (presets != null)
+        {
+            if (presets.Count != rule.Conditions.Count)
+                throw new ArgumentException(
+                    $"预置条件触发器数量 ({presets.Count}) 与规则条件数 ({rule.Conditions.Count}) 不一致", nameof(presets));
+            _conditionTriggers.AddRange(presets);
+        }
     }
 
     public async Task InitializeAsync()
@@ -92,8 +121,12 @@ public sealed class RuleTrigger : IDisposable, IPostPollCallback
                 // 上一轮已经按"不满足"记过一笔下降沿，这一轮正常判定：条件还锁着 ⇒ 立刻变成上升沿 ⇒ 重发
                 _reArmPending = false;
             }
-            else if (currentResult && ComparisonHelper.IsHoldExpired(_actionStampedUtc, nowUtc))
+            else if (currentResult && _previousCompositeResult
+                     && ComparisonHelper.IsHoldExpired(_actionStampedUtc, nowUtc))
             {
+                // 条件里必须有 _previousCompositeResult：纠偏管的是"一直满足、计时已经满了"这一种情况。
+                // 少了这半句，规则解除后过了很久又满足时，那个真实的上升沿也会被当成"该纠偏了"按成不满足，
+                // 动作白等一个轮询周期，日志还写着"已连续满足满 30 分钟"——与事实相反。
                 // 本轮当作"不满足"造一个下降沿；条件还锁着，所以下一轮重新变成满足 ⇒ 一次上升沿 ⇒
                 // 整套动作重发。计时挂在规则上，不是每个条件各挂一个（那样一条 AND 规则会被乘倍）。
                 // 注意必须两拍：单靠"本轮判 false"不会刷新盖章，下一轮"计时已过期"仍然成立，
@@ -124,24 +157,58 @@ public sealed class RuleTrigger : IDisposable, IPostPollCallback
                 }
                 else
                 {
-                    _logger.LogRuleTriggered(_rule.Name, reason);
-                    _actionStampedUtc = nowUtc;
-
-                    _ = Task.Run(async () =>
+                    // 归还 _actionInFlight 的责任必须留在这一层：原来的 try/finally 写在 Task.Run 内部，
+                    // 只要在起任务之前抛了异常（日志、调度器拒绝排队……），finally 就永远不执行，
+                    // 闸门恒为 1 ⇒ 这条规则此后每轮只打"已有动作在飞，本次跳过"，再不动作。
+                    var dispatched = false;
+                    try
                     {
-                        try
+                        _logTriggered(_rule.Name, reason);
+
+                        _ = Task.Run(async () =>
                         {
-                            await _linkerService.ExecuteRuleAsync(_rule).ConfigureAwait(false);
-                        }
-                        catch (Exception ex)
+                            try
+                            {
+                                await _executeActions(_rule, CancellationToken.None).ConfigureAwait(false);
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.Error($"规则 [{_rule.Name}] 执行失败", ex);
+                            }
+                            finally
+                            {
+                                Interlocked.Exchange(ref _actionInFlight, 0);
+                            }
+                        });
+
+                        _actionStampedUtc = nowUtc;
+                        dispatched = true;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Error($"规则 [{_rule.Name}] 派发动作失败（本拍作废，下一拍重试）", ex);
+                    }
+                    finally
+                    {
+                        if (!dispatched) Interlocked.Exchange(ref _actionInFlight, 0);
+                    }
+
+                    if (!dispatched)
+                    {
+                        // 没派出去就不算"这一拍满足过"：否则要等到条件解除再满足才会重试，
+                        // 而持续满足的场景根本等不到那一下。
+                        currentResult = false;
+                    }
+                    else
+                    {
+                        // 事件型条件（app 启动/关闭、到点）的脉冲只管一次：动作已经发出去了，
+                        // 留着会让同一个事件在后面的轮次里再触发一遍。
+                        // 派发失败/已有动作在飞时**不**消费，下一拍还能拿同一个事件重试。
+                        foreach (var condition in _conditionTriggers)
                         {
-                            _logger.Error($"规则 [{_rule.Name}] 执行失败", ex);
+                            if (condition.IsPulseCondition) condition.ConsumePulse();
                         }
-                        finally
-                        {
-                            Interlocked.Exchange(ref _actionInFlight, 0);
-                        }
-                    });
+                    }
                 }
             }
 
