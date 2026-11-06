@@ -190,19 +190,4 @@ internal static class HardwareSensorReader
             ?? valid.Cast<SensorSnapshot?>().First();
     }
 
-    /// <summary>释放 CPU/GPU 硬件句柄（由 PollingScheduler.DisposeAsync 调用）。</summary>
-    internal static void Shutdown()
-    {
-        lock (Gate)
-        {
-            try { _computer?.Close(); } catch { }
-            try { (_computer as IDisposable)?.Dispose(); } catch { }
-            _computer = null;
-            _cpu = null;
-            _gpu = null;
-            _initialized = false;
-            _initFailed = false;
-            _lastUpdateUtc = DateTime.MinValue;
-        }
-    }
 }

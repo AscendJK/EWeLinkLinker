@@ -15,6 +15,14 @@ public sealed class ServiceLogger : IDisposable
     private readonly Func<DateTime> _now;
     private volatile bool _enabled;
     private volatile bool _disposed;
+    private long _droppedCount;
+    private long _writeFailures;
+
+    /// <summary>队列满被丢弃的条数（不再阻塞调用方）。</summary>
+    public long DroppedEntries => Interlocked.Read(ref _droppedCount);
+
+    /// <summary>写盘失败的条数（写线程遇到单条失败会继续跑，不再整体退出）。</summary>
+    public long WriteFailures => Interlocked.Read(ref _writeFailures);
 
     public ServiceLogger(string logPath, bool enabled = true) : this(logPath, enabled, static () => DateTime.Now)
     {
@@ -81,20 +89,33 @@ public sealed class ServiceLogger : IDisposable
             // 阻塞等待日志，直到队列完成
             foreach (var entry in _logQueue.GetConsumingEnumerable())
             {
-                var today = _now().Date;
-                if (writer == null)
+                // 单条写失败（磁盘满 / 文件被占 / 目录被删）不能让整个日志线程退出：
+                // 线程一退，队列灌满后调用方——包括跑在 SCM 控制线程上的 OnStart/OnStop——就会永久阻塞。
+                // 所以这里按条 try/catch，并且把 writer 置空，给下一轮重开文件的机会。
+                try
                 {
-                    currentDate = today;
-                    writer = OpenWriterForDate(today);
+                    var today = _now().Date;
+                    if (writer == null)
+                    {
+                        currentDate = today;
+                        writer = OpenWriterForDate(today);
+                    }
+                    else if (today != currentDate)
+                    {
+                        writer.Dispose();
+                        currentDate = today;
+                        writer = OpenWriterForDate(today);
+                        CleanupOldLogs(Path.GetDirectoryName(_logPath));
+                    }
+                    writer.WriteLine(entry);
                 }
-                else if (today != currentDate)
+                catch (Exception ex)
                 {
-                    writer.Dispose();
-                    currentDate = today;
-                    writer = OpenWriterForDate(today);
-                    CleanupOldLogs(Path.GetDirectoryName(_logPath));
+                    Interlocked.Increment(ref _writeFailures);
+                    System.Diagnostics.Debug.WriteLine($"[ServiceLogger] 写入失败（继续跑）: {ex.Message}");
+                    try { writer?.Dispose(); } catch { }
+                    writer = null;
                 }
-                writer.WriteLine(entry);
             }
         }
         catch (Exception ex)
@@ -284,12 +305,23 @@ public sealed class ServiceLogger : IDisposable
         var logEntry = $"[{DateTime.Now:HH:mm:ss.fff}] [{level}] {message}";
         // H-? 修复：TryAdd 在 Dispose 后的 BlockingCollection 上可能抛 ObjectDisposedException
         // _disposed 的 volatile 读和 Dispose 的 CompleteAdding 之间有极小竞态窗口
+        // 队列满时**丢弃并计数**，绝不阻塞调用方（见 TryEnqueueWithoutBlocking 的注释）。
         try
         {
-            _logQueue.TryAdd(logEntry);
+            if (!TryEnqueueWithoutBlocking(_logQueue, logEntry))
+                Interlocked.Increment(ref _droppedCount);
         }
         catch (ObjectDisposedException) { }
     }
+
+    /// <summary>
+    /// 入队且**永不阻塞**。<c>BlockingCollection.TryAdd(item)</c> 是"无限等待"的那个重载——
+    /// 队列满（容量 1000）时它会一直卡住调用方。而调用方包括跑在 SCM 控制线程上的
+    /// OnStart/OnStop：写线程一旦卡死，服务就变成"既起不来也停不下"。
+    /// 这里用 0 超时：满了就丢并计数，宁可少一行日志也不能卡住服务。
+    /// </summary>
+    internal static bool TryEnqueueWithoutBlocking(BlockingCollection<string> queue, string entry)
+        => queue.TryAdd(entry, 0);
 
     /// <summary>
     /// 释放日志写入器

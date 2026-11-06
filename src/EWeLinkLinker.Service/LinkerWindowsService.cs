@@ -1,4 +1,4 @@
-﻿using System.Reflection;
+using System.Reflection;
 using System.ServiceProcess;
 using System.Text;
 using EWeLinkLinker.Core.Cloud;
@@ -24,6 +24,12 @@ public class LinkerWindowsService : ServiceBase
     private FileSystemWatcher? _configWatcher;
     private CancellationTokenSource? _wakeCts; // 修复：唤醒任务取消支持
     private string? _triggerSignature;  // 当前已加载规则的签名，用于跳过无谓的触发器重建
+
+    /// <summary>
+    /// 正在停止。OnStart 里 fire-and-forget 的触发器启动任务靠它判断"还要不要起来"——
+    /// 停止过程中把调度器拉起来，会留下一个没人停的轮询循环。
+    /// </summary>
+    private volatile bool _stopping;
 
     // 配置热重载串行化：一次重载要换客户端、停旧触发器、起新触发器，两次交叠会把这套状态撕开
     // （同一规则注册两份、或对着已 Dispose 的触发器再 Stop）。监视器事件汇进这一条通道，
@@ -75,6 +81,8 @@ public class LinkerWindowsService : ServiceBase
 
     protected override void OnStart(string[] args)
     {
+        _stopping = false;
+
         // 启动阶段先开日志：_logger.Enabled 原本要等配置读完才置位，
         // 若配置正好损坏，损坏原因就会被写入开关吞掉
         LoggerConfig.IsEnabled = true;
@@ -167,7 +175,10 @@ public class LinkerWindowsService : ServiceBase
                 return;
             }
 
-            _triggerManager = new TriggerManager(service, _logPath, _logger);
+            // 拿局部变量：不能再在 lambda 里读字段 _triggerManager —— OnStop 会把它置 null，
+            // 启动后立刻停止时就是 NRE；更糟的是 StartAllAsync 可能在 StopAllAsync 之后执行，
+            // 留下一个没人停的轮询循环（服务显示已停止，设备却还在被控制）。
+            var manager = _triggerManager = new TriggerManager(service, _logPath, _logger);
             _triggerSignature = BuildTriggerSignature(config);
 
             // 异步加载和启动（使用配置的轮询间隔）
@@ -177,8 +188,13 @@ public class LinkerWindowsService : ServiceBase
             {
                 try
                 {
-                    await _triggerManager.LoadRulesAsync(config.Rules, pollingInterval);
-                    await _triggerManager.StartAllAsync();
+                    await manager.LoadRulesAsync(config.Rules, pollingInterval);
+                    if (_stopping)
+                    {
+                        Log("服务正在停止，放弃启动触发器（避免留下无人停止的轮询循环）");
+                        return;
+                    }
+                    await manager.StartAllAsync();
                     Log($"Trigger manager started with {activeTriggerCount} triggers, polling interval: {pollingInterval}s");
                 }
                 catch (Exception ex)
@@ -330,6 +346,9 @@ public class LinkerWindowsService : ServiceBase
         {
             if (!rule.Enabled) continue;
 
+            // ReconcileMinutes 必须进签名：它只在构造 RuleTrigger 时读一次，
+            // 不进来就会出现"改了纠偏周期 → 签名没变 → 跳过重建 → 新值不生效"。
+            sb.Append("|R").Append(rule.ReconcileMinutes);
             sb.Append("|C[");
             foreach (var c in rule.Conditions)
             {
@@ -377,6 +396,7 @@ public class LinkerWindowsService : ServiceBase
 
     protected override void OnStop()
     {
+        _stopping = true;
         Log("Service stopping...");
 
         // 停止配置文件监控
@@ -555,6 +575,11 @@ public class LinkerWindowsService : ServiceBase
     /// </summary>
     private void InitializeClients()
     {
+        // LanClient 必须在这里补建：CreateLinkerService 用 _lanClient! 传参，
+        // 而 OnStop 会把它置空。原来的实现只建 CloudClient/TokenManager，
+        // 于是"停止后再来一个事件（唤醒/热重载）"就是一个 NRE。
+        if (_lanClient == null) _lanClient = new LanClient(_sharedHttpClient);
+
         var config = TryLoadConfig();
         if (config == null)
         {

@@ -22,6 +22,11 @@ internal sealed class ScriptedTrigger : OptimizedTriggerBase
     /// <summary>这一轮评估是否抛异常（用于验证"异常 = 本轮没有定论"的记账）。</summary>
     public bool FailNextPoll { get; set; }
 
+    /// <summary>第一轮故意报"读数未知"，用来驱动多轮补读（SensorReadiness）。</summary>
+    public bool UnknownOnFirstPoll { get; set; }
+
+    private bool _firstPollDone;
+
     /// <summary>基类记账：上一次轮询是否真的拿到了读数（只有本程序集可见）。</summary>
     public bool ReadingKnown => LastReadingAvailable;
 
@@ -32,6 +37,13 @@ internal sealed class ScriptedTrigger : OptimizedTriggerBase
     {
         // 刻意不碰 LastReadingAvailable：生产里的 time/interval/app_* 触发器也不碰它，
         // 这正是"抛过一次异常就永久停在读数未知"那条缺陷的现场条件。
+        if (UnknownOnFirstPoll && !_firstPollDone)
+        {
+            _firstPollDone = true;
+            LastReadingAvailable = false;
+            return ValueTask.FromResult(false);
+        }
+
         if (FailNextPoll) throw new InvalidOperationException("传感器的假故障");
 
         if (_satisfied)

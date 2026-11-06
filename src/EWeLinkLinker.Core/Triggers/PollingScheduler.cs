@@ -292,10 +292,11 @@ public sealed class PollingScheduler : IAsyncDisposable
                 await Task.Delay(50).ConfigureAwait(false);
         }
 
-        // C-3 修复：先清空缓存（释放 Process[] 等），再释放静态硬件句柄
+        // C-3 修复：先清空缓存（释放 Process[] 等）
         _sensorCache.Clear();
-        HardwareSensorReader.Shutdown();
-        CpuUsageTrigger.StaticDispose();
+        // 硬件句柄（LHM 的 Computer / PDH 计数器）**故意不在这里释放**：
+        // 调度器每次配置重载都会重建，在这里释放就变成"每次改配置 → 卸载并重装 LHM 内核驱动"，
+        // 实测 8 次重载触发 7 次重新初始化、句柄 +13。它们是进程级监视资源，随进程退出由系统回收。
         _triggers.Clear();
         _postPollCallbacks.Clear();
         _semaphore.Dispose();

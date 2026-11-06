@@ -134,16 +134,4 @@ public class CpuUsageTrigger : OptimizedTriggerBase
         }
     }
 
-    /// <summary>
-    /// 静态释放 PerformanceCounter（由 PollingScheduler.DisposeAsync 调用）
-    /// </summary>
-    internal static void StaticDispose()
-    {
-        lock (_counterLock)
-        {
-            try { _sharedCounter?.Dispose(); } catch { }
-            _sharedCounter = null;
-            _counterInitialized = false;
-        }
-    }
 }

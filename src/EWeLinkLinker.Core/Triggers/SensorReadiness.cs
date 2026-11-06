@@ -51,7 +51,10 @@ internal static class SensorReadiness
                 // 必须先 Start 再 Poll：PollAsync 里靠 "State == Monitoring" 决定要不要把满足写成
                 // Triggered，Idle 状态下读到的值不进状态 ⇒ 基线永远是"不满足"，第一轮真轮询就变成上升沿。
                 trigger.Start();
-                triggered[i] = await trigger.PollAsync(ct);
+                // 累积而不是覆盖：PollAsync 的返回值是"这一轮有没有上升沿"，条件一旦锁存，
+                // 后续轮次恒为 false。直接覆盖会把第一轮的真结果冲掉——于是
+                // `boot AND cpu_temp≥80 AND cpu_usage≥50` 这种含"首轮读不到读数"的规则在事件路径上永不执行。
+                triggered[i] |= await trigger.PollAsync(ct);
                 readingKnown[i] = trigger.LastReadingAvailable;
             }
 

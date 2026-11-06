@@ -95,6 +95,7 @@ public class MdnsStatusClient
             }
 
             var deadline = DateTime.UtcNow + timeout;
+            var socketErrors = 0;
             while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
             {
                 var remaining = deadline - DateTime.UtcNow;
@@ -109,7 +110,21 @@ public class MdnsStatusClient
 
                 UdpReceiveResult recv;
                 try { recv = await receive.ConfigureAwait(false); }
-                catch (Exception) { break; }
+                catch (SocketException ex)
+                {
+                    // 不能一遇到收包异常就跳出整个循环：一台设备已下线时，Windows 会针对我们
+                    // 发出去的 UDP 回 ICMP port-unreachable，ReceiveAsync 随即抛 SocketException(10054)，
+                    // 原来的 `break` 会让整次"刷新状态"作废，界面却说"局域网没有可问的设备"。
+                    // 但要限次：如果 socket 真坏了，别在剩余窗口里原地空转刷日志。
+                    socketErrors++;
+                    SimpleLogger.Log($"[LanStatus] 收包异常({ex.SocketErrorCode})，继续等其它设备");
+                    if (socketErrors >= 5) break;
+                    continue;
+                }
+                catch (Exception)
+                {
+                    break;
+                }
 
                 ParsePacket(recv.Buffer, recv.RemoteEndPoint.Address.ToString(), targets, strictBest, looseBest);
             }
