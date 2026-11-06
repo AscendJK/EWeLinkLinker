@@ -109,6 +109,13 @@ public class ChannelListConverter : IMultiValueConverter
     private static readonly Dictionary<int, List<string>> _cache = new();
     private static readonly object _cacheLock = new();
 
+    /// <summary>
+    /// 候选上限。真实设备最多 8 路；越界的 outlet（配置被手改成 50000 之类）
+    /// 如果照它生成候选，就会一次性造出几万个字符串把界面卡住并永久缓存。
+    /// 越界本身由 SaveConfig 点名拦下（"通道号超出这台设备的通道数"），这里只需要不炸。
+    /// </summary>
+    private const int MaxCandidates = 64;
+
     private static List<string> ForCount(int count)
     {
         lock (_cacheLock)
@@ -141,7 +148,7 @@ public class ChannelListConverter : IMultiValueConverter
             }
         }
 
-        return ForCount(Math.Max(count, outlet + 1));
+        return ForCount(Math.Min(MaxCandidates, Math.Max(count, outlet + 1)));
     }
 
     public object[] ConvertBack(object value, Type[] targetTypes, object parameter, CultureInfo culture)

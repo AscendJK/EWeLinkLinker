@@ -211,7 +211,7 @@
                                                                     </Grid.ColumnDefinitions>
 
                                                                     <!-- 逻辑运算符 -->
-                                                                    <ComboBox Grid.Column="0" SelectedValue="{Binding Operator}" SelectedValuePath="Tag"
+                                                                    <ComboBox Grid.Column="0" SelectedValue="{Binding OperatorKey}" SelectedValuePath="Tag"
                                                                               MinWidth="46" Margin="0,0,4,0" VerticalAlignment="Center">
                                                                         <ComboBoxItem Content="且" Tag="And"/>
                                                                         <ComboBoxItem Content="或" Tag="Or"/>

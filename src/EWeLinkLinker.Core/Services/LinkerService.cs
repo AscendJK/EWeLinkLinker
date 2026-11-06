@@ -304,19 +304,18 @@ public class LinkerService
     /// </summary>
     private static List<LinkerRule> FindMatchingRules(List<LinkerRule> rules, string eventName)
     {
-        // 首先尝试旧格式匹配（Event 属性）
-        var matches = rules.Where(r =>
+        // 两套格式都要匹配，不能"旧格式命中就提前 return"：配置里只要还残留一条带 Event 字段的
+        // 旧规则，同事件的新格式规则就会被整体忽略，而且毫无日志线索。
+        var byLegacyEvent = rules.Where(r =>
+            r.Enabled &&
             !string.IsNullOrEmpty(r.Event) &&
-            r.Event.Equals(eventName, StringComparison.OrdinalIgnoreCase) &&
-            r.Enabled) // 只选启用的规则
-            .ToList();
+            r.Event.Equals(eventName, StringComparison.OrdinalIgnoreCase));
 
-        if (matches.Count > 0) return matches;
+        var byConditions = rules.Where(r =>
+            r.Enabled &&
+            r.Conditions.Any(c => c.Type.Equals(eventName, StringComparison.OrdinalIgnoreCase)));
 
-        // 新格式匹配（Conditions 中的 Type）
-        return rules.Where(r =>
-            r.Enabled && // 只选启用的规则
-            r.Conditions.Any(c => c.Type.Equals(eventName, StringComparison.OrdinalIgnoreCase)))
-            .ToList();
+        // Union 按引用去重：同一条规则不会因为两种判据都命中而被执行两遍
+        return byLegacyEvent.Union(byConditions).ToList();
     }
 }

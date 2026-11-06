@@ -189,6 +189,25 @@ public partial class RuleCondition : ObservableObject
     public LogicalOperator Operator { get; set; } = LogicalOperator.And;
 
     /// <summary>
+    /// 界面上「且 / 或」下拉绑这个字符串，而不是直接绑 <see cref="Operator"/> 枚举：
+    /// 下拉候选的 Tag 是字符串（"And"/"Or"），WPF 的 SelectedValue 是拿"候选 Tag"和"绑定值"比相等，
+    /// 绑到枚举上永远匹配不上 —— 于是下拉框一直是空白，看不出当前这条是且还是或。
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string OperatorKey
+    {
+        get => Operator.ToString();
+        set
+        {
+            if (Enum.TryParse<LogicalOperator>(value, ignoreCase: true, out var parsed) && parsed != Operator)
+            {
+                Operator = parsed;
+                OnPropertyChanged();
+            }
+        }
+    }
+
+    /// <summary>
     /// 获取数值类型的参数（用于数字输入控件，不序列化）
     /// </summary>
     [System.Text.Json.Serialization.JsonIgnore]

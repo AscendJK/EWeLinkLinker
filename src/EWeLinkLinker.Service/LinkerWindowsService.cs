@@ -288,6 +288,14 @@ public class LinkerWindowsService : ServiceBase
     /// </summary>
     private async Task ReloadConfigAsync()
     {
+        // 文件暂时不存在 ≠ "配置变成 0 条规则"：编辑器/工具"先删后写"、或用户正把文件移回去，
+        // 这个窗口里 LinkerConfig.Load 会返回一个空配置，照着重载就把正在跑的规则全清了。
+        if (!File.Exists(_configPath))
+        {
+            Log("Reload skipped: config file temporarily missing, keeping current triggers");
+            return;
+        }
+
         // 坏配置不重载，保留当前正在运行的触发器
         var config = TryLoadConfig();
         if (config == null)

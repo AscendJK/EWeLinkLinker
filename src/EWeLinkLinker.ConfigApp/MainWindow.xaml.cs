@@ -46,6 +46,11 @@ public partial class MainWindow : Window, IDisposable
 
     private bool _isLoggingIn;
     private bool _isRefreshing;
+    /// <summary>
+    /// 通道开关正在下发。刻意和 <see cref="_isRefreshing"/> 分开：
+    /// 原来两者共用一个标志，刷新时点通道按钮会被静默吞掉（按钮却已经翻过去了）。
+    /// </summary>
+    private bool _isChannelBusy;
     private readonly Dictionary<string, DeviceCardVisual> _deviceCards = new();
     private bool _hasAutoDiscovered;
     private DateTime _lastAutoReloginUtc = DateTime.MinValue;
@@ -843,8 +848,17 @@ public partial class MainWindow : Window, IDisposable
 
     private async Task ToggleChannel(DeviceInfo device, int outlet, ToggleButton btn)
     {
-        if (_isRefreshing) return;
-        _isRefreshing = true;
+        // 刷新进行中不允许手动控制。注意 ToggleButton 的 IsChecked 在 Click 之前就已经翻过去了，
+        // 所以这里必须显式翻回来：否则界面显示"开"、设备没收到命令、模型也没改，
+        // 用户看到的是一次"点了没反应但状态变了"的假象。
+        if (_isRefreshing || _isChannelBusy)
+        {
+            btn.IsChecked = !(btn.IsChecked == true);
+            Log($"[通道] 刷新进行中，忽略 {device.Name} 通道{outlet} 的点击（按钮状态已复位）");
+            return;
+        }
+
+        _isChannelBusy = true;
         btn.IsEnabled = false;
 
         bool originalState = btn.IsChecked == true;
@@ -871,7 +885,7 @@ public partial class MainWindow : Window, IDisposable
         }
         finally
         {
-            _isRefreshing = false;
+            _isChannelBusy = false;
             btn.IsEnabled = true;
         }
     }
@@ -1358,18 +1372,44 @@ public partial class MainWindow : Window, IDisposable
 
     private static string GetAppInfo(string processName)
     {
-        var processes = System.Diagnostics.Process.GetProcesses()
-            .Where(p => p.ProcessName.Contains(processName, StringComparison.OrdinalIgnoreCase) ||
-                       (p.MainWindowTitle?.Contains(processName, StringComparison.OrdinalIgnoreCase) ?? false))
-            .ToList();
-
-        if (processes.Any())
+        // Process 对象持有内核句柄，必须一个个释放——每次点「测试」都把全系统进程句柄拦一遍，
+        // 不释放就是稳定的句柄泄漏（Process.GetProcesses() 返回的就是句柄）。
+        var all = System.Diagnostics.Process.GetProcesses();
+        var matched = new List<System.Diagnostics.Process>();
+        try
         {
-            var list = string.Join("\n", processes.Take(5).Select(p => $"  - {p.ProcessName} (PID: {p.Id})"));
+            foreach (var p in all)
+            {
+                string name;
+                string title;
+                try { name = p.ProcessName; title = p.MainWindowTitle; }
+                catch { continue; }   // 进程在遍历中退出 / 无权限
+
+                if (name.Contains(processName, StringComparison.OrdinalIgnoreCase) ||
+                    (title?.Contains(processName, StringComparison.OrdinalIgnoreCase) ?? false))
+                {
+                    matched.Add(p);
+                }
+            }
+
+            if (matched.Count == 0)
+            {
+                return $"进程名: {processName}\n没有找到运行中的匹配进程";
+            }
+
+            var list = string.Join("\n", matched.Take(5).Select(p => $"  - {p.ProcessName} (PID: {p.Id})"));
             return $"进程名: {processName}\n运行中的进程:\n{list}";
         }
-        return $"进程名: {processName}\n状态: 未运行";
+        finally
+        {
+            foreach (var p in all)
+            {
+                if (!matched.Contains(p)) { try { p.Dispose(); } catch { } }   // 没保留的立刻释放
+            }
+            foreach (var p in matched) { try { p.Dispose(); } catch { } }
+        }
     }
+
 
     private void DeviceCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
