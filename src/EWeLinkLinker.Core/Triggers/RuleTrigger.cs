@@ -104,7 +104,9 @@ public sealed class RuleTrigger : IDisposable, IPostPollCallback
                 Parameter = condition.Parameter,
                 Parameter2 = condition.Parameter2,
                 ReleaseBand = condition.ReleaseBand,
-                Comparison = condition.Comparison
+                Comparison = condition.Comparison,
+                // 节拍型触发器（interval）靠它把上一次敲钟接回来，否则热重载会清零倒计时
+                Key = condition.Id
             };
             var trigger = TriggerRegistry.Create(config);
             _conditionTriggers.Add(trigger);

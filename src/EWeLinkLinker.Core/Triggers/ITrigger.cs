@@ -68,6 +68,13 @@ public class TriggerConfig
     public ComparisonOperator Comparison { get; set; } = ComparisonOperator.Gte;
     public string Comparer { get; set; } = "and"; // 保留用于兼容
 
+    /// <summary>
+    /// 条件身份（RuleCondition.Id）。只有 interval 这类"节拍型"触发器用得到：
+    /// 热重载会重建触发器实例，靠这个键把上一次的节拍接回来，否则倒计时会被清零。
+    /// 事件路径的临时触发器不填，等于"一次性"，不污染任何节拍。
+    /// </summary>
+    public string Key { get; set; } = "";
+
     public string ToJson() => System.Text.Json.JsonSerializer.Serialize(this);
 
     public static TriggerConfig? FromJson(string json) =>
