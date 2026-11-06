@@ -1,4 +1,4 @@
-﻿# Install EWeLink Linker Service
+# Install EWeLink Linker Service
 # Can be run from ConfigApp's publish directory or project root
 
 param(
@@ -88,6 +88,19 @@ $logDir = Join-Path $publishDir "logs"
 
 if (-not (Test-Path $configDir)) { New-Item -ItemType Directory -Path $configDir -Force | Out-Null }
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
+
+# 配置目录里是 DPAPI（LocalMachine 范围）密文，任何本机用户都能解开——必须收紧到
+# SYSTEM / Administrators / 配置者本人。这一步以前是"手工 icacls"，不可复现，所以换机器就会漏。
+$aclScript = Join-Path $projectRoot "bench\set_config_acl.ps1"
+if (Test-Path $aclScript) {
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    & pwsh -NoProfile -File $aclScript -Repo $projectRoot -Owner $me -Quiet
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "WARNING: 配置目录 ACL 收紧失败（退出码 $LASTEXITCODE）——配置里的账号密码对本机其它用户仍是可读的" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "WARNING: 找不到 $aclScript，跳过 ACL 收紧（配置目录会保持继承来的 Authenticated Users 权限）" -ForegroundColor Yellow
+}
 
 # Shared config file is created by ConfigApp (publish\config\linker.json); service reads the same file directly
 $sharedConfig = Join-Path $configDir "linker.json"

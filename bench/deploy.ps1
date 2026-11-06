@@ -1,4 +1,4 @@
-﻿param([string]$RunId = 'anon', [string]$ExpectSha = '')
+param([string]$RunId = 'anon', [string]$ExpectSha = '')
 $ErrorActionPreference = 'Stop'
 
 $repo    = 'E:\ClaudeCode\EWeLinkLinker'
@@ -116,6 +116,20 @@ $down = ((Get-Date) - $t0).TotalSeconds
 Say ("running in " + ('{0:N1}' -f $sec2) + "s ; total downtime " + ('{0:N1}' -f $down) + "s")
 if ((Get-Service -Name $svcName).Status -ne 'Running') { Restore-Backup 'service never reached Running'; exit 4 }
 
+# ---------- 3.5 配置目录 ACL ----------
+# publish\config 里是 DPAPI(LocalMachine) 密文：任何本机用户读得到就能解开。
+# 这里顺手把它收紧成 SYSTEM / Administrators / 配置者本人，并记进 CHECK。
+$aclScript = Join-Path $repo 'bench\set_config_acl.ps1'
+$aclExit = 99
+if (Test-Path $aclScript) {
+  & pwsh -NoProfile -File $aclScript -Repo $repo -Owner ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -Quiet *>&1 |
+    ForEach-Object { Say ('  acl| ' + $_) }
+  $aclExit = $LASTEXITCODE
+} else {
+  Say ('  acl| MISSING ' + $aclScript)
+}
+Say ('config ACL enforce exit=' + $aclExit)
+
 # ---------- 4. post checks ----------
 foreach ($f in $keyFiles) { Say ('installed after : ' + (Split-Path $f -Leaf) + ' [' + (Split-Path (Split-Path $f -Parent) -Leaf) + '] sha=' + (Sha256 $f) + ' ver=' + (ProdVer $f)) }
 $cfgAfter = @((Get-Item $cfgFile).Length, (Get-Item $cfgFile).LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'), (Sha256 $cfgFile))
@@ -159,6 +173,7 @@ $res = [ordered]@{
   warns          = @([regex]::Matches($j, '\[WARN\]')).Count
   configUnchanged = (($cfgAfter -join '|') -eq ($cfgBefore -join '|'))
   aclTight       = ($auN -eq 0 -and $sysN -gt 0 -and ($usrN.Count -gt 0) -and $usrN[0].FileSystemRights.ToString() -match 'Read')
+  configAclTight = ($aclExit -eq 0)
 }
 foreach ($k in $res.Keys) { Say ("CHECK {0} = {1}" -f $k, $res[$k]) }
 

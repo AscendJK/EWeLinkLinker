@@ -84,8 +84,11 @@ public class MdnsStatusClient
         using (udp)
         {
             var query = BuildQuery(ServiceName);
-            foreach (var ep in new[] { new IPEndPoint(MdnsGroup, MdnsPort) }
-                        .Concat(targets.Values.Select(d => new IPEndPoint(IPAddress.Parse(d.IpAddress), MdnsPort))))
+            var endpoints = BuildQueryEndpoints(targets.Values, out var skippedEndpoints);
+            if (skippedEndpoints > 0)
+                SimpleLogger.Log($"[LanStatus] {skippedEndpoints} 台设备的 IP 无法解析，已跳过（不影响其它设备）");
+
+            foreach (var ep in endpoints)
             {
                 try { await udp.SendAsync(query, query.Length, ep).ConfigureAwait(false); }
                 catch { /* 组播或单播哪条发得出去走哪条，另一条兜 */ }
@@ -271,15 +274,12 @@ public class MdnsStatusClient
         var deviceId = rawId.Trim();
         if (!targets.TryGetValue(deviceId.ToLowerInvariant(), out var device)) return;
 
-        var data = new StringBuilder();
-        for (int i = 1; i <= 8; i++)
-            if (kv.TryGetValue("data" + i, out var chunk)) data.Append(chunk);
-
+        var data = BuildDataPayload(kv);
         if (data.Length == 0 || !kv.TryGetValue("iv", out var iv)) return;
         if (!kv.TryGetValue("encrypt", out var enc) || !enc.Equals("true", StringComparison.OrdinalIgnoreCase)) return;
 
         string plain;
-        try { plain = AesCrypto.Decrypt(data.ToString(), device.DeviceKey, iv); }
+        try { plain = AesCrypto.Decrypt(data, device.DeviceKey, iv); }
         catch (Exception) { return; }
 
         var channels = ReadSwitches(plain);
@@ -311,6 +311,52 @@ public class MdnsStatusClient
     {
         if (!best.TryGetValue(key, out var existing) || IsNewerSeq(status.Seq, existing.Seq))
             best[key] = status;
+    }
+
+    /// <summary>
+    /// 组播一条 + 每台设备一条单播。IP 解析不出来的只跳过那一台：
+    /// 原来是在 Concat 里直接 <c>IPAddress.Parse</c>，配置里一个畸形 IP（带空格、写成 "ip:8081"）
+    /// 就抛 FormatException 冲出整个方法，整次局域网状态读取作废，界面只剩一句"读取异常"。
+    /// </summary>
+    internal static List<IPEndPoint> BuildQueryEndpoints(IEnumerable<DeviceInfo> devices, out int skipped)
+    {
+        var endpoints = new List<IPEndPoint> { new(MdnsGroup, MdnsPort) };
+        skipped = 0;
+        foreach (var device in devices)
+        {
+            // Trim：配置里多一个空格不该让这台设备失去局域网状态读能力
+            if (!IPAddress.TryParse(device.IpAddress?.Trim(), out var addr) ||
+                addr.AddressFamily != AddressFamily.InterNetwork)
+            {
+                skipped++;
+                continue;
+            }
+            endpoints.Add(new IPEndPoint(addr, MdnsPort));
+        }
+        return endpoints;
+    }
+
+    /// <summary>
+    /// 把 TXT 里的 data1..dataN 按序号拼起来。
+    /// 老实现写死 1..8：分片数随参数长度增长，第 9 片起被悄悄截断 ⇒ 解密失败 ⇒
+    /// 设备被算成"没应答"，而真实原因是解析器读不懂。
+    /// </summary>
+    internal static string BuildDataPayload(IReadOnlyDictionary<string, string> txt)
+    {
+        List<(int Index, string Value)>? chunks = null;
+        foreach (var kv in txt)
+        {
+            if (kv.Key.Length <= 4 || !kv.Key.StartsWith("data", StringComparison.OrdinalIgnoreCase)) continue;
+            if (!int.TryParse(kv.Key.AsSpan(4), out var index)) continue;
+            (chunks ??= new List<(int, string)>()).Add((index, kv.Value));
+        }
+
+        if (chunks == null) return string.Empty;
+
+        chunks.Sort(static (a, b) => a.Index.CompareTo(b.Index));
+        var sb = new StringBuilder(chunks.Count * 16);
+        foreach (var (_, value) in chunks) sb.Append(value);
+        return sb.ToString();
     }
 
     private static Dictionary<int, bool> ReadSwitches(string json)

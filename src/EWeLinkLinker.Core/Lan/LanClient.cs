@@ -23,22 +23,19 @@ public class LanClient
         _logger = logger;
     }
 
-    public async Task<List<DeviceInfo>> DiscoverDevicesAsync(List<DeviceInfo> knownDevices)
+    public async Task<List<DeviceInfo>> DiscoverDevicesAsync(List<DeviceInfo> knownDevices, CancellationToken ct = default)
     {
-        var logPath = Path.Combine(AppContext.BaseDirectory, "debug.log");
-        Config.LinkerConfig.TrimLogFile(logPath, 2_097_152);
-
         var subnet = DetectLocalSubnet();
         var needDiscovery = knownDevices.Count(d => string.IsNullOrEmpty(d.IpAddress) && d.HasLocalMac);
         SimpleLogger.Log($"[Discovery] Start: {knownDevices.Count} devices, {needDiscovery} need IP, subnet={subnet ?? "none"}");
 
-        // Step 1: Ping sweep + ARP
+        // Step 1: Ping sweep + ARP（只是把邻居塞进 ARP 缓存，失败不影响后续）
         if (!string.IsNullOrEmpty(subnet))
         {
             await PingSweepAsync(subnet);
         }
 
-        var arpTable = await GetArpTableAsync();
+        var arpTable = await GetArpTableAsync(ct);
 
         // Step 2: MAC matching
         var assignedIps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -54,9 +51,18 @@ public class LanClient
             if (!string.IsNullOrEmpty(device.IpAddress) || !device.HasLocalMac)
                 continue;
 
-            var effectiveMac = NormalizeMac(device.EffectiveMac);
+            var effectiveMac = LanDiscoveryParsing.NormalizeMac(device.EffectiveMac);
+            if (effectiveMac.Length == 0)
+            {
+                // 真实 MAC 填成 "AA:BB:CC" 这种也会走到这里：两边归一后都是空串，
+                // 以前会让"空 == 空"配上随便一个解析失败的 ARP 行，等于把 IP 配错。
+                notFound++;
+                SimpleLogger.Log($"[Discovery] {device.Name}: MAC 不是有效的 12 位十六进制，跳过匹配");
+                continue;
+            }
+
             var matchingEntry = arpTable.FirstOrDefault(e =>
-                NormalizeMac(e.Value).Equals(effectiveMac, StringComparison.OrdinalIgnoreCase) &&
+                e.Value.Equals(effectiveMac, StringComparison.OrdinalIgnoreCase) &&
                 !assignedIps.Contains(e.Key));
 
             if (!string.IsNullOrEmpty(matchingEntry.Key))
@@ -76,87 +82,117 @@ public class LanClient
         // Step 3: TCP port scan for remaining devices
         var stillUnmatched = knownDevices.Where(d =>
             string.IsNullOrEmpty(d.IpAddress) && d.IsOnline && d.HasLocalMac).ToList();
+        var tcpMatched = 0;
         if (stillUnmatched.Count > 0 && !string.IsNullOrEmpty(subnet))
         {
             SimpleLogger.Log($"[Discovery] TCP scan for {stillUnmatched.Count} unmatched devices...");
-            await TcpPortScanAsync(subnet, stillUnmatched);
+            try
+            {
+                tcpMatched = await TcpPortScanAsync(subnet, stillUnmatched, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                // 扫描是尽力而为：超时/取消不该让整次刷新失败——ARP 已经匹配到的设备是有效结果。
+                // 原来这个异常会一路抛到界面上，用户看到"刷新失败"，其实大部分设备已经拿到了。
+                SimpleLogger.Log("[Discovery] TCP 扫描超时/取消，保留已匹配到的结果");
+            }
         }
 
-        SimpleLogger.Log($"[Discovery] Done: {matched} matched via ARP, {stillUnmatched.Count} via TCP");
+        var stillNoIp = knownDevices.Count(d => string.IsNullOrEmpty(d.IpAddress));
+        // 原来这里打的是扫描前的快照数，跟 TCP 实际认领了几台无关——运维据此判断会得到反的结论
+        SimpleLogger.Log($"[Discovery] Done: {matched} matched via ARP, {tcpMatched} via TCP, {stillNoIp} 仍无 IP");
 
         // Final summary
         var foundCount = knownDevices.Count(d => !string.IsNullOrEmpty(d.IpAddress));
         var cloudOnlyCount = knownDevices.Count(d => string.IsNullOrEmpty(d.IpAddress) && !d.HasLocalMac);
-        SimpleLogger.Log($"[Discovery] Result: {foundCount}/{knownDevices.Count} with IP, {cloudOnlyCount} cloud-only");
+        SimpleLogger.Log($"[Discovery] Result: {foundCount}/{knownDevices.Count} with IP, {cloudOnlyCount} cloud-only, {notFound} MAC 未命中");
         return knownDevices;
     }
 
-    private static string NormalizeMac(string mac)
-    {
-        if (string.IsNullOrEmpty(mac)) return string.Empty;
-        var clean = mac.Replace(":", "").Replace("-", "").Replace(".", "").Replace(" ", "").ToLowerInvariant();
-        if (clean.Length == 12 && clean.All(c => "0123456789abcdef".Contains(c)))
-            return clean;
-        return string.Empty;
-    }
-
-    private static string DetectLocalSubnet()
+    /// <summary>
+    /// 起一个子进程并等它，超过 timeout（或 ct 取消）就杀掉并把 null 还给调用方。
+    /// 抽出来是因为 <c>arp -a</c> 原来是裸的 <c>WaitForExitAsync()</c>：没有超时、没有取消，
+    /// arp 一旦卡住，"刷新IP"就永久挂起，而界面上只有一句没有进度提示的"刷新中"。
+    /// </summary>
+    internal static async Task<string?> RunProcessWithTimeoutAsync(
+        string fileName, string arguments, TimeSpan timeout, CancellationToken ct = default)
     {
         try
         {
-            // 第一遍：优先选择带默认网关的 IPv4 接口（真实上网网卡），
-            // 避免 VPN / Hyper-V 虚拟网卡（Up 状态但无网关）被误选
-            foreach (var iface in NetworkInterface.GetAllNetworkInterfaces())
+            using var process = new Process
             {
-                if (iface.OperationalStatus != OperationalStatus.Up) continue;
-                if (iface.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
-
-                var props = iface.GetIPProperties();
-                bool hasGateway = props.GatewayAddresses.Any(g =>
-                    g.Address != null && !g.Address.Equals(IPAddress.Any));
-                if (!hasGateway) continue;
-
-                foreach (var addr in props.UnicastAddresses)
+                StartInfo = new ProcessStartInfo
                 {
-                    if (addr.Address.AddressFamily != AddressFamily.InterNetwork) continue;
-
-                    var ip = addr.Address.ToString();
-                    if (ip.StartsWith("169.254.")) continue;
-
-                    var parts = ip.Split('.');
-                    if (parts.Length == 4)
-                        return $"{parts[0]}.{parts[1]}.{parts[2]}";
+                    FileName = fileName,
+                    Arguments = arguments,
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    StandardOutputEncoding = Encoding.UTF8
                 }
+            };
+
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(timeout);
+
+            if (!process.Start()) return null;
+
+            // 先开始读，再等退出：反过来会在输出缓冲区填满时互等
+            var stdoutTask = process.StandardOutput.ReadToEndAsync(cts.Token);
+            try
+            {
+                await process.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { }
+                SimpleLogger.Log($"[Discovery] {fileName} 超过 {timeout.TotalSeconds:F0}s 未返回，已终止");
+                return null;
             }
 
-            // 回退：任意 Up 状态的 IPv4 接口
-            foreach (var iface in NetworkInterface.GetAllNetworkInterfaces())
-            {
-                if (iface.OperationalStatus != OperationalStatus.Up) continue;
-                if (iface.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
-
-                var props = iface.GetIPProperties();
-                foreach (var addr in props.UnicastAddresses)
-                {
-                    if (addr.Address.AddressFamily != AddressFamily.InterNetwork) continue;
-
-                    var ip = addr.Address.ToString();
-                    // H-? 修复：仅排除已知的虚拟网卡段，不再硬编码排除 192.168.80/84
-                    // 同时保留 169.254.x.x APIPA 段的排除
-                    if (ip.StartsWith("169.254."))
-                        continue;
-
-                    var parts = ip.Split('.');
-                    if (parts.Length == 4)
-                    {
-                        return $"{parts[0]}.{parts[1]}.{parts[2]}";
-                    }
-                }
-            }
+            return await stdoutTask.ConfigureAwait(false);
         }
-        catch { }
+        catch (Exception ex)
+        {
+            SimpleLogger.Log($"[Discovery] {fileName} 执行失败: {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
 
-        return "192.168.1";
+    /// <summary>
+    /// 取一块网卡快照交给 <see cref="LanDiscoveryParsing.SelectSubnet"/> 挑网段。
+    /// 挑选规则（虚拟网卡优先剔除、网关优先）在纯函数里，可单测；这里只负责读真实网卡。
+    /// 枚举失败不再静默：以前 catch { } 之后盲扫 192.168.1 段，用户只看到"刷新IP 没找到设备"。
+    /// </summary>
+    private static string? DetectLocalSubnet()
+    {
+        try
+        {
+            var adapters = new List<NetAdapter>();
+            foreach (var iface in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                var props = iface.GetIPProperties();
+                var ipv4 = props.UnicastAddresses
+                    .Where(a => a.Address.AddressFamily == AddressFamily.InterNetwork)
+                    .Select(a => a.Address.ToString())
+                    .FirstOrDefault();
+                var hasGateway = props.GatewayAddresses.Any(g =>
+                    g.Address != null && !g.Address.Equals(IPAddress.Any));
+
+                adapters.Add(new NetAdapter(iface.Name, iface.Description, iface.NetworkInterfaceType,
+                                            iface.OperationalStatus, ipv4, hasGateway));
+            }
+
+            var subnet = LanDiscoveryParsing.SelectSubnet(adapters);
+            if (subnet == null)
+                SimpleLogger.Log("[Discovery] 没有可用的 IPv4 网卡，本次跳过网段扫描（只看 ARP 现有条目）");
+            return subnet;
+        }
+        catch (Exception ex)
+        {
+            SimpleLogger.Log($"[Discovery] 网卡枚举失败: {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
     }
 
     private static async Task PingSweepAsync(string subnet)
@@ -195,77 +231,41 @@ public class LanClient
         await Task.Delay(300);
     }
 
-    private async Task<Dictionary<string, string>> GetArpTableAsync()
+    private async Task<Dictionary<string, string>> GetArpTableAsync(CancellationToken ct = default)
     {
-        var arpTable = new Dictionary<string, string>();
+        // 5 秒上限：arp 本身是本地命令，正常情况下几十毫秒返回；卡住时宁可没有 ARP 表，
+        // 也不能让"刷新IP"一直转圈。解析逻辑搬到了 LanDiscoveryParsing（可单测）。
+        var output = await RunProcessWithTimeoutAsync("arp", "-a", TimeSpan.FromSeconds(5), ct)
+            .ConfigureAwait(false);
 
-        try
-        {
-            using var process = new Process
-            {
-                StartInfo = new ProcessStartInfo
-                {
-                    FileName = "arp",
-                    Arguments = "-a",
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    StandardOutputEncoding = Encoding.UTF8
-                }
-            };
+        if (output == null)
+            _logger?.LogWarning("Failed to get ARP table (timeout or error)");
 
-            process.Start();
-            var output = await process.StandardOutput.ReadToEndAsync();
-            await process.WaitForExitAsync();
-
-            var lines = output.Split('\n');
-            foreach (var line in lines)
-            {
-                var trimmed = line.Trim();
-                if (string.IsNullOrEmpty(trimmed)) continue;
-
-                if (trimmed.StartsWith("Interface") || trimmed.StartsWith("接口")
-                    || trimmed.StartsWith("Internet")) continue;
-
-                var parts = trimmed.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-                if (parts.Length >= 2)
-                {
-                    var ip = parts[0];
-                    var mac = parts[1].Replace("-", ":").Replace(".", ":");
-
-                    if (IPAddress.TryParse(ip, out var parsed) &&
-                        parsed.AddressFamily == AddressFamily.InterNetwork &&
-                        (mac.Contains(':') || mac.Length == 17))
-                    {
-                        arpTable[ip] = mac.ToLower();
-                    }
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger?.LogWarning(ex, "Failed to get ARP table");
-        }
-
-        return arpTable;
+        return LanDiscoveryParsing.ParseArpOutput(output);
     }
 
-    private async Task TcpPortScanAsync(string subnet, List<DeviceInfo> unmatchedDevices)
+    /// <summary>
+    /// 扫 8081 端口并把开放端口与"还没 IP 的设备"对上。返回这次 TCP 认领到的台数。
+    /// </summary>
+    private async Task<int> TcpPortScanAsync(string subnet, List<DeviceInfo> unmatchedDevices, CancellationToken ct = default)
     {
-        var alreadyMatchedIps = new HashSet<string>(
-            unmatchedDevices.Where(d => !string.IsNullOrEmpty(d.IpAddress)).Select(d => d.IpAddress!));
-
         using var sem = new System.Threading.SemaphoreSlim(50);
         var openPorts = new System.Collections.Concurrent.ConcurrentBag<string>();
 
-        using var scanCts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(30));
+        using var scanCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        scanCts.CancelAfter(TimeSpan.FromSeconds(30));
         var portTasks = Enumerable.Range(1, 254).Select(i => $"{subnet}.{i}").Select(ip => Task.Run(async () =>
         {
-            if (alreadyMatchedIps.Contains(ip)) return;
-            await sem.WaitAsync(scanCts.Token);
             TcpClient? client = null;
+            var acquired = false;
             try
             {
+                // WaitAsync 必须在 try 里：原来它在外面，30 秒预算一到就抛 OperationCanceledException，
+                // 从 lambda 里逃出去，Task.WhenAll 把它聚合成"整次发现失败"——界面上是"刷新失败"，
+                // 而 ARP 已经匹配到的设备其实都是有效结果。
+                await sem.WaitAsync(scanCts.Token);
+                acquired = true;
+
                 client = new TcpClient();
                 var connectTask = client.ConnectAsync(ip, 8081, scanCts.Token).AsTask();
                 var delayTask = Task.Delay(300, scanCts.Token);
@@ -280,16 +280,24 @@ public class LanClient
             finally
             {
                 client?.Dispose();
-                sem.Release();
+                if (acquired) sem.Release();
             }
         }, scanCts.Token));
-        await Task.WhenAll(portTasks);
 
-        if (openPorts.Count == 0) return;
+        try
+        {
+            await Task.WhenAll(portTasks);
+        }
+        catch (OperationCanceledException)
+        {
+            SimpleLogger.Log($"[Discovery] 端口扫描 30s 预算用尽，按已扫到的 {openPorts.Count} 个端口继续");
+        }
+
+        if (openPorts.Count == 0) return 0;
 
         var claimedIps = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
         var probeTasks = new List<Task>();
-        var probeSem = new System.Threading.SemaphoreSlim(5);
+        using var probeSem = new System.Threading.SemaphoreSlim(5);
 
         foreach (var ip in openPorts)
         {
@@ -320,11 +328,15 @@ public class LanClient
 
         await Task.WhenAll(probeTasks);
 
-        var stillUnmatchedCount = unmatchedDevices.Count(d => string.IsNullOrEmpty(d.IpAddress));
+        // 进来时这些设备都没有 IP，现在有 IP 的就是这一次 TCP 认领到的
+        var tcpMatched = unmatchedDevices.Count(d => !string.IsNullOrEmpty(d.IpAddress));
+        var stillUnmatchedCount = unmatchedDevices.Count - tcpMatched;
         if (stillUnmatchedCount > 0)
         {
             SimpleLogger.Log($"[Discovery] TCP: {stillUnmatchedCount} devices could not be identified");
         }
+
+        return tcpMatched;
     }
 
     private static async Task<bool> ProbeDeviceAsync(string ip, DeviceInfo device)
