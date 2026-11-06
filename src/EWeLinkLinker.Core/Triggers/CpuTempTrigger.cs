@@ -87,7 +87,7 @@ public class CpuTempTrigger : OptimizedTriggerBase
                 ? $"{_parameter}°C"
                 : $"{_parameter}~{_parameter2}°C";
             Log(TraceLevel.Info,
-                $"CPU温度: {temp:F1}°C (热区{(_zoneIndex >= 0 ? _zoneIndex.ToString() : "?")}), 阈值: {_comparison} {threshold}, 状态: {(isTriggered ? "满足" : "不满足")}");
+                $"CPU温度: {temp:F1}°C ({_sensorSource ?? "?"}), 阈值: {_comparison} {threshold}, 状态: {(isTriggered ? "满足" : "不满足")}");
         }
 
         // 边沿检测：从未满足变为满足时触发，保持锁存直到条件消失
@@ -108,11 +108,36 @@ public class CpuTempTrigger : OptimizedTriggerBase
     }
 
     private bool _loggedWmiError;
-    // 当前实际读取的热区索引（供日志诊断：确认是否取到最高温热区）
-    private static int _zoneIndex = -1;
+    // 当前这一次读数到底来自哪支传感器（供日志诊断："CPU Package" / "ACPI 热区0"）
+    private static string? _sensorSource;
 
     private static float ReadCpuTemperature()
     {
+        // 优先用 LHM 的 CPU 封装温度。ACPI 热区是主板 EC 上报的，本机实测：满载时读数
+        // 卡 12–30 秒不动再一步跳 12°C，与封装温度的瞬时偏差中位 12°C、最大 18°C，
+        // 负载结束后封装已降到 60°C 它仍显示 77°C —— 用它判 `CPU<65` 必然"人都凉了它还说热"。
+        if (HardwareSensorReader.TryReadCpuTemperature(out var lhmTemp, out var lhmSource))
+        {
+            _sensorSource = lhmSource;
+            return lhmTemp;
+        }
+
+        // 回退：LHM 打不开（没内核驱动 / 被内存完整性拦住）时退回 ACPI 热区，
+        // 精度回到旧水平，但功能不退化。
+        var acpi = ReadAcpiZoneTemperature(out var zoneIndex);
+        _sensorSource = float.IsNaN(acpi)
+            ? null
+            : (zoneIndex >= 0 ? $"ACPI 热区{zoneIndex}" : "ACPI 热区");
+        return acpi;
+    }
+
+    /// <summary>
+    /// 旧的取数路径：ACPI 热区，多热区时取最高温的那个。
+    /// 只有在 LHM 拿不到 CPU 温度时才会走到这里。
+    /// </summary>
+    private static float ReadAcpiZoneTemperature(out int hottestZoneIndex)
+    {
+        hottestZoneIndex = -1;
         try
         {
             using var searcher = new System.Management.ManagementObjectSearcher(
@@ -133,7 +158,7 @@ public class CpuTempTrigger : OptimizedTriggerBase
                         if (float.IsNaN(maxTemp) || tempC > maxTemp)
                         {
                             maxTemp = tempC;
-                            _zoneIndex = index;
+                            hottestZoneIndex = index;
                         }
                     }
                 }

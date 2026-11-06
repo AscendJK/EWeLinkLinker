@@ -19,40 +19,61 @@ public class RuleTriggerTests
     [Fact]
     public async Task 解除后再次满足_必须在同一拍派发()
     {
-        var saved = ComparisonHelper.MaxReleaseHold;
-        ComparisonHelper.MaxReleaseHold = TimeSpan.Zero;   // 让盖章当拍即过期，模拟长时间粘住
-        try
+        var condition = new ScriptedTrigger();
+        using var h = new RuleHarness(RuleHarness.BuildRule(("cpu_temp", LogicalOperator.And)), condition);
+        h.Trigger.ReconcileHoldOverride = TimeSpan.FromTicks(1);   // 视作"计时早就满了"
+
+        // 第 1 拍：满足 → 派发
+        condition.Satisfy();
+        await condition.PollAsync();
+        h.Trigger.OnPollingComplete();
+        Assert.True(h.Trigger.ActionInFlight);
+        await h.WaitDispatchedAsync(1);
+        h.ReleaseGate();
+        await h.WaitIdleAsync();
+
+        // 第 2 拍：解除（造下降沿）
+        condition.Unsatisfy();
+        await condition.PollAsync();
+        h.Trigger.OnPollingComplete();
+        Assert.False(h.Trigger.ActionInFlight);
+
+        // 第 3 拍：重新满足 —— 这是真实的上升沿，必须当拍派发
+        condition.Satisfy();
+        await condition.PollAsync();
+        h.Trigger.OnPollingComplete();
+        Assert.True(h.Trigger.ActionInFlight);      // 旧实现这里是 false（被纠偏吃掉）
+        await h.WaitDispatchedAsync(2);
+        Assert.Equal(2, h.DispatchCount);
+    }
+
+    /// <summary>
+    /// 默认（ReconcileMinutes = 0）不纠偏：条件一直满足时**不会**每 30 分钟重发一遍。
+    /// 现场那条恒真规则以前一天多发 55 次命令，就是这么来的。
+    /// </summary>
+    [Fact]
+    public async Task 默认不纠偏_持续满足只发一次()
+    {
+        var rule = RuleHarness.BuildRule(("cpu_temp", LogicalOperator.And));
+        Assert.Equal(0, rule.ReconcileMinutes);
+
+        var condition = new ScriptedTrigger();
+        using var h = new RuleHarness(rule, condition);
+        Assert.Equal(TimeSpan.Zero, h.Trigger.ReconcileHold);
+
+        condition.Satisfy();
+        await condition.PollAsync();
+        h.Trigger.OnPollingComplete();
+        h.ReleaseGate();
+        await h.WaitIdleAsync();
+
+        for (var i = 0; i < 20; i++)
         {
-            var condition = new ScriptedTrigger();
-            using var h = new RuleHarness(RuleHarness.BuildRule(("cpu_temp", LogicalOperator.And)), condition);
-
-            // 第 1 拍：满足 → 派发
-            condition.Satisfy();
             await condition.PollAsync();
             h.Trigger.OnPollingComplete();
-            Assert.True(h.Trigger.ActionInFlight);
-            await h.WaitDispatchedAsync(1);
-            h.ReleaseGate();
-            await h.WaitIdleAsync();
-
-            // 第 2 拍：解除（造下降沿）
-            condition.Unsatisfy();
-            await condition.PollAsync();
-            h.Trigger.OnPollingComplete();
-            Assert.False(h.Trigger.ActionInFlight);
-
-            // 第 3 拍：重新满足 —— 这是真实的上升沿，必须当拍派发
-            condition.Satisfy();
-            await condition.PollAsync();
-            h.Trigger.OnPollingComplete();
-            Assert.True(h.Trigger.ActionInFlight);      // 旧实现这里是 false（被纠偏吃掉）
-            await h.WaitDispatchedAsync(2);
-            Assert.Equal(2, h.DispatchCount);
         }
-        finally
-        {
-            ComparisonHelper.MaxReleaseHold = saved;
-        }
+
+        Assert.Equal(1, h.DispatchCount);
     }
 
     /// <summary>
@@ -98,44 +119,39 @@ public class RuleTriggerTests
     }
 
     /// <summary>
-    /// 纠偏本身要保住：持续满足时，每满一个粘住周期仍要重发一次动作（现场实测每天 55 次）。
-    /// 这条是"修 A2 别把纠偏一起修没了"的护栏。
+    /// 显式开了 ReconcileMinutes 的规则，仍保留"每满一个周期重发一次"的对账能力
+    /// （给"设备可能被人手动改过"这种场景用）。默认是关的，见上面那条用例。
     /// </summary>
     [Fact]
-    public async Task 持续满足_每满一个粘住周期重发一次()
+    public async Task 显式开启纠偏后_每满一个周期重发一次()
     {
-        var saved = ComparisonHelper.MaxReleaseHold;
-        ComparisonHelper.MaxReleaseHold = TimeSpan.Zero;
-        try
+        var rule = RuleHarness.BuildRule(("cpu_temp", LogicalOperator.And));
+        rule.ReconcileMinutes = 30;
+
+        var condition = new ScriptedTrigger();
+        using var h = new RuleHarness(rule, condition);
+        h.Trigger.ReconcileHoldOverride = TimeSpan.FromTicks(1);   // 视作"周期已满"
+
+        async Task PollAsync()
         {
-            var condition = new ScriptedTrigger();
-            using var h = new RuleHarness(RuleHarness.BuildRule(("cpu_temp", LogicalOperator.And)), condition);
-
-            async Task PollAsync()
-            {
-                condition.Satisfy();
-                await condition.PollAsync();
-                h.Trigger.OnPollingComplete();
-            }
-
-            await PollAsync();                              // 派发 1
-            Assert.True(h.Trigger.ActionInFlight);
-            await h.WaitDispatchedAsync(1);
-            h.ReleaseGate();
-            await h.WaitIdleAsync();
-
-            await PollAsync();                              // 强制重判（造下降沿），不派发
-            Assert.False(h.Trigger.ActionInFlight);
-
-            await PollAsync();                              // 重新上升 → 派发 2
-            Assert.True(h.Trigger.ActionInFlight);
-            await h.WaitDispatchedAsync(2);
-            Assert.Equal(2, h.DispatchCount);
+            condition.Satisfy();
+            await condition.PollAsync();
+            h.Trigger.OnPollingComplete();
         }
-        finally
-        {
-            ComparisonHelper.MaxReleaseHold = saved;
-        }
+
+        await PollAsync();                              // 派发 1
+        Assert.True(h.Trigger.ActionInFlight);
+        await h.WaitDispatchedAsync(1);
+        h.ReleaseGate();
+        await h.WaitIdleAsync();
+
+        await PollAsync();                              // 强制重判（造下降沿），不派发
+        Assert.False(h.Trigger.ActionInFlight);
+
+        await PollAsync();                              // 重新上升 → 派发 2
+        Assert.True(h.Trigger.ActionInFlight);
+        await h.WaitDispatchedAsync(2);
+        Assert.Equal(2, h.DispatchCount);
     }
 
     /// <summary>组内 AND：缺一个不派发，凑齐才派发。</summary>
@@ -225,35 +241,30 @@ public class RuleTriggerTests
     [Fact]
     public async Task 动作在飞时不并发派发第二批()
     {
-        var saved = ComparisonHelper.MaxReleaseHold;
-        ComparisonHelper.MaxReleaseHold = TimeSpan.Zero;
-        try
-        {
-            var condition = new ScriptedTrigger();
-            using var h = new RuleHarness(RuleHarness.BuildRule(("cpu_temp", LogicalOperator.And)), condition);
+        var rule = RuleHarness.BuildRule(("cpu_temp", LogicalOperator.And));
+        rule.ReconcileMinutes = 30;     // 打开纠偏，好让它反复尝试派发
 
-            condition.Satisfy();
+        var condition = new ScriptedTrigger();
+        using var h = new RuleHarness(rule, condition);
+        h.Trigger.ReconcileHoldOverride = TimeSpan.FromTicks(1);
+
+        condition.Satisfy();
+        await condition.PollAsync();
+        h.Trigger.OnPollingComplete();      // 派发，闸门不放
+        Assert.True(h.Trigger.ActionInFlight);
+        await h.WaitDispatchedAsync(1);
+
+        // 强制重判 → 再上升，但闸门还关着
+        for (var i = 0; i < 3; i++)
+        {
             await condition.PollAsync();
-            h.Trigger.OnPollingComplete();      // 派发，闸门不放
-            Assert.True(h.Trigger.ActionInFlight);
-            await h.WaitDispatchedAsync(1);
-
-            // 强制重判 → 再上升，但闸门还关着
-            for (var i = 0; i < 3; i++)
-            {
-                await condition.PollAsync();
-                h.Trigger.OnPollingComplete();
-            }
-
-            await Task.Delay(50);
-            Assert.Equal(1, h.DispatchCount);   // 没有第二批
-
-            h.ReleaseGate();
-            await h.WaitIdleAsync();
+            h.Trigger.OnPollingComplete();
         }
-        finally
-        {
-            ComparisonHelper.MaxReleaseHold = saved;
-        }
+
+        await Task.Delay(50);
+        Assert.Equal(1, h.DispatchCount);   // 没有第二批
+
+        h.ReleaseGate();
+        await h.WaitIdleAsync();
     }
 }

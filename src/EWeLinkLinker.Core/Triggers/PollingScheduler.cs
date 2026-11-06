@@ -294,7 +294,7 @@ public sealed class PollingScheduler : IAsyncDisposable
 
         // C-3 修复：先清空缓存（释放 Process[] 等），再释放静态硬件句柄
         _sensorCache.Clear();
-        GpuTempTrigger.StaticDispose();
+        HardwareSensorReader.Shutdown();
         CpuUsageTrigger.StaticDispose();
         _triggers.Clear();
         _postPollCallbacks.Clear();

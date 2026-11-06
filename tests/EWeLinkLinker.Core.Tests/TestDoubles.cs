@@ -2,7 +2,7 @@ using EWeLinkLinker.Core.Logging;
 using EWeLinkLinker.Core.Models;
 using EWeLinkLinker.Core.Triggers;
 
-// 静态可调项（ComparisonHelper.MaxReleaseHold）与日志目录在用例之间共享，禁用并行以免互相踩。
+// 日志目录与静态硬件句柄在用例之间共享，禁用并行以免互相踩。
 [assembly: Xunit.CollectionBehavior(DisableTestParallelization = true)]
 
 namespace EWeLinkLinker.Core.Tests;

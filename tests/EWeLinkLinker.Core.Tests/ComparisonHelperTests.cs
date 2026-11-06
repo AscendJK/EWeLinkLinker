@@ -147,22 +147,21 @@ public class ComparisonHelperTests
 
     [Fact]
     public void 粘住计时_没有起表就永不过期()
-        => Assert.False(ComparisonHelper.IsHoldExpired(null, DateTime.UtcNow));
+        => Assert.False(ComparisonHelper.IsHoldExpired(null, DateTime.UtcNow, TimeSpan.FromMinutes(30)));
 
     [Fact]
     public void 粘住计时_满一个周期即过期()
     {
-        var saved = ComparisonHelper.MaxReleaseHold;
-        try
-        {
-            ComparisonHelper.MaxReleaseHold = TimeSpan.FromMinutes(30);
-            var now = new DateTime(2026, 11, 6, 12, 0, 0, DateTimeKind.Utc);
-            Assert.False(ComparisonHelper.IsHoldExpired(now.AddMinutes(-29), now));
-            Assert.True(ComparisonHelper.IsHoldExpired(now.AddMinutes(-30), now));
-        }
-        finally
-        {
-            ComparisonHelper.MaxReleaseHold = saved;
-        }
+        var hold = TimeSpan.FromMinutes(30);
+        var now = new DateTime(2026, 11, 6, 12, 0, 0, DateTimeKind.Utc);
+        Assert.False(ComparisonHelper.IsHoldExpired(now.AddMinutes(-29), now, hold));
+        Assert.True(ComparisonHelper.IsHoldExpired(now.AddMinutes(-30), now, hold));
+    }
+
+    [Fact]
+    public void 粘住计时_周期为0表示不纠偏_永不过期()
+    {
+        var now = new DateTime(2026, 11, 6, 12, 0, 0, DateTimeKind.Utc);
+        Assert.False(ComparisonHelper.IsHoldExpired(now.AddHours(-5), now, TimeSpan.Zero));
     }
 }

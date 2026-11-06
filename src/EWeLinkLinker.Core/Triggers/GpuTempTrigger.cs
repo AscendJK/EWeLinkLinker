@@ -22,13 +22,6 @@ public class GpuTempTrigger : OptimizedTriggerBase
     // 当前实际读取的传感器名称（供日志诊断：确认是否选到 GPU Core / Hot Spot / Memory）
     private static string? _sensorName;
 
-    // 静态共享的 GPU 硬件实例（所有 GpuTempTrigger 共享）
-    private static Computer? _sharedComputer;
-    private static IHardware? _sharedGpu;
-    private static bool _gpuInitialized;
-    private static bool _gpuInitFailed;
-    private static readonly object _initLock = new();
-
     public override string Type => "gpu_temp";
     public override string DisplayName => "GPU温度";
 
@@ -110,120 +103,18 @@ public class GpuTempTrigger : OptimizedTriggerBase
     }
 
     /// <summary>
-    /// 静态释放 GPU 硬件实例（由 PollingScheduler.DisposeAsync 调用）
+    /// 读 GPU 温度：统一走 HardwareSensorReader（与 CPU 共用同一个 LHM 实例，
+    /// 内核驱动只加载一次）。传感器优先级见 PickGpuTemperature。
     /// </summary>
-    internal static void StaticDispose()
-    {
-        lock (_initLock)
-        {
-            try { _sharedComputer?.Close(); } catch { }
-            try { (_sharedComputer as IDisposable)?.Dispose(); } catch { }
-            _sharedComputer = null;
-            _sharedGpu = null;
-            _gpuInitialized = false;
-            _gpuInitFailed = false;
-        }
-    }
-
-    private static void InitializeGpu()
-    {
-        try
-        {
-            _sharedComputer = new Computer { IsGpuEnabled = true };
-            _sharedComputer.Open();
-
-            foreach (var hardware in _sharedComputer.Hardware)
-            {
-                if (hardware.HardwareType == HardwareType.GpuNvidia
-                    || hardware.HardwareType == HardwareType.GpuAmd
-                    || hardware.HardwareType == HardwareType.GpuIntel)
-                {
-                    _sharedGpu = hardware;
-                    break;
-                }
-            }
-
-            if (_sharedGpu == null)
-            {
-                _gpuInitFailed = true;
-                EWeLinkLinker.Core.Logging.SimpleLogger.Log("[GPU] No supported GPU found");
-            }
-
-            _gpuInitialized = true;
-        }
-        catch (Exception ex)
-        {
-            _gpuInitFailed = true;
-            _gpuInitialized = true;
-            EWeLinkLinker.Core.Logging.SimpleLogger.Log($"[GPU] Initialization failed: {ex.Message}");
-        }
-    }
-
     private static float ReadGpuTemperature()
     {
-        // 在锁内获取引用，避免释放锁后被其他线程置为 null
-        IHardware? gpu;
-        lock (_initLock)
+        if (HardwareSensorReader.TryReadGpuTemperature(out var value, out var source))
         {
-            if (!_gpuInitialized && !_gpuInitFailed)
-                InitializeGpu();
-
-            // H-? 修复：在锁内调用 gpu.Update()，防止多线程并发 Update 导致竞态
-            if (_sharedGpu != null)
-            {
-                try { _sharedGpu.Update(); } catch { }
-            }
-            gpu = _sharedGpu;
+            _sensorName = source;
+            return value;
         }
 
-        if (gpu == null) return float.NaN;
-
-        try
-        {
-            // 优先级1：GPU 核心温度（GPU Core / Core），避免选到 Hot Spot（偏高）或 Memory（偏低）
-            foreach (var sensor in gpu.Sensors)
-            {
-                if (sensor.SensorType != SensorType.Temperature || !sensor.Value.HasValue) continue;
-                var name = sensor.Name;
-                if (name.Contains("GPU Core", StringComparison.OrdinalIgnoreCase)
-                    || name.Equals("Core", StringComparison.OrdinalIgnoreCase))
-                {
-                    _sensorName = name;
-                    return sensor.Value.Value;
-                }
-            }
-
-            // 优先级2：通用 GPU 温度（排除易误导的显存/热点/结温传感器）
-            foreach (var sensor in gpu.Sensors)
-            {
-                if (sensor.SensorType != SensorType.Temperature || !sensor.Value.HasValue) continue;
-                var name = sensor.Name;
-                if (name.Contains("GPU", StringComparison.OrdinalIgnoreCase)
-                    && !name.Contains("Memory", StringComparison.OrdinalIgnoreCase)
-                    && !name.Contains("Hot Spot", StringComparison.OrdinalIgnoreCase)
-                    && !name.Contains("Junction", StringComparison.OrdinalIgnoreCase)
-                    && !name.Contains("VRAM", StringComparison.OrdinalIgnoreCase))
-                {
-                    _sensorName = name;
-                    return sensor.Value.Value;
-                }
-            }
-
-            // 优先级3：任意温度传感器（兜底）
-            foreach (var sensor in gpu.Sensors)
-            {
-                if (sensor.SensorType == SensorType.Temperature && sensor.Value.HasValue)
-                {
-                    _sensorName = sensor.Name;
-                    return sensor.Value.Value;
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"[GPU] Read temperature failed: {ex.Message}");
-        }
-
+        _sensorName = null;
         return float.NaN;
     }
 }

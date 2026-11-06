@@ -380,6 +380,17 @@ public class LinkerRule
     public string Id { get; set; } = Guid.NewGuid().ToString("N")[..8];
     public string Name { get; set; } = "新规则";
     public bool Enabled { get; set; } = true;
+
+    /// <summary>
+    /// 纠偏重发周期（分钟）。0 = 关闭（默认）。
+    ///
+    /// 以前是写死的 30 分钟：只要条件持续满足，每满 30 分钟就把整套动作再发一遍，
+    /// 目的是"设备可能被人手动改过"。实际效果是**没变化也在动**——现场实测一条恒真规则
+    /// 一天多发 55 次命令。现在改成显式配置：不填就不重发，需要这种对账能力的规则
+    /// 自己写 `"reconcileMinutes": 30`。
+    /// </summary>
+    public int ReconcileMinutes { get; set; }
+
     public ObservableCollection<RuleCondition> Conditions { get; set; } = new();
     public ObservableCollection<LinkerAction> Actions { get; set; } = new();
 

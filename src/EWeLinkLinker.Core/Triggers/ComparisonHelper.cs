@@ -112,16 +112,12 @@ public static class ComparisonHelper
     }
 
     /// <summary>
-    /// 锁存最长可保持多久，到期强制松开重新判定（纠正"规则以为已经处理过、
-    /// 但设备实际被人手动改过"的状态）。默认 30 分钟；测试可缩短。
+    /// 纠偏计时是否已满（未记录起始时间时永不超期）。
+    /// hold 由规则自己的 ReconcileMinutes 决定；<= 0 表示这条规则没开纠偏，
+    /// 调用方根本不会问这个问题。
     /// </summary>
-    public static TimeSpan MaxReleaseHold { get; set; } = TimeSpan.FromMinutes(30);
-
-    /// <summary>
-    /// 锁存是否已经超时。未记录起始时间（即没有滞回）时永不超时，维持旧行为。
-    /// </summary>
-    public static bool IsHoldExpired(DateTime? latchedSinceUtc, DateTime nowUtc) =>
-        latchedSinceUtc.HasValue && nowUtc - latchedSinceUtc.Value >= MaxReleaseHold;
+    public static bool IsHoldExpired(DateTime? latchedSinceUtc, DateTime nowUtc, TimeSpan hold) =>
+        latchedSinceUtc.HasValue && hold > TimeSpan.Zero && nowUtc - latchedSinceUtc.Value >= hold;
 
     /// <summary>
     /// 配置里存的是"带宽"（意图：允许抖动多少），解除线是它派生出来的数。

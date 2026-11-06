@@ -47,6 +47,17 @@ public sealed class RuleTrigger : IDisposable, IPostPollCallback
     private bool _reArmPending;
 
     /// <summary>
+    /// 纠偏重发周期（来自规则配置，0 = 关闭）。关闭时不重发——见 LinkerRule.ReconcileMinutes。
+    /// </summary>
+    private readonly TimeSpan _reconcileHold;
+
+    /// <summary>测试用：把纠偏周期压到 0，不用真的等。</summary>
+    internal TimeSpan? ReconcileHoldOverride { get; set; }
+
+    /// <summary>当前生效的纠偏周期（0 = 不纠偏）。internal 供测试确认默认值。</summary>
+    internal TimeSpan ReconcileHold => ReconcileHoldOverride ?? _reconcileHold;
+
+    /// <summary>
     /// 这条规则当前是否有一批动作正在执行（0/1）。上一批还没跑完就再发一批，
     /// 两条执行队列会交错写同一个插座，后发的那批可能把前一批刚设好的状态改回去。
     /// </summary>
@@ -74,6 +85,7 @@ public sealed class RuleTrigger : IDisposable, IPostPollCallback
         _scheduler = scheduler;
         _executeActions = executeActions;
         _logTriggered = logTriggered;
+        _reconcileHold = TimeSpan.FromMinutes(Math.Max(0, rule.ReconcileMinutes));
         // 可轮询条件的位置表：电源事件条件被排除在外
         for (var i = 0; i < rule.Conditions.Count; i++)
         {
@@ -144,8 +156,12 @@ public sealed class RuleTrigger : IDisposable, IPostPollCallback
                 _reArmPending = false;
             }
             else if (currentResult && _previousCompositeResult
-                     && ComparisonHelper.IsHoldExpired(_actionStampedUtc, nowUtc))
+                     && ComparisonHelper.IsHoldExpired(_actionStampedUtc, nowUtc, ReconcileHold))
             {
+                // 这一段只在规则显式配了 ReconcileMinutes > 0 时才可能进入（默认 0 = 不纠偏）。
+                // 以前这里是写死的 30 分钟：条件只要持续满足，每半小时就把整套动作重发一遍，
+                // 现场实测一条恒真规则一天多发 55 次命令——用户看到的是"温度没变它也在动"。
+                //
                 // 条件里必须有 _previousCompositeResult：纠偏管的是"一直满足、计时已经满了"这一种情况。
                 // 少了这半句，规则解除后过了很久又满足时，那个真实的上升沿也会被当成"该纠偏了"按成不满足，
                 // 动作白等一个轮询周期，日志还写着"已连续满足满 30 分钟"——与事实相反。
@@ -154,7 +170,7 @@ public sealed class RuleTrigger : IDisposable, IPostPollCallback
                 // 注意必须两拍：单靠"本轮判 false"不会刷新盖章，下一轮"计时已过期"仍然成立，
                 // 于是每一轮都被按成不满足，永远等不到上升沿，动作一次都发不出去。
                 _reArmPending = true;
-                _logger.Info($"规则 [{_rule.Name}] 已连续满足满 {ComparisonHelper.MaxReleaseHold}，本轮强制重判（纠偏：设备可能被人手动改过）");
+                _logger.Info($"规则 [{_rule.Name}] 已连续满足满 {ReconcileHold}，本轮强制重判（纠偏：设备可能被人手动改过）");
                 currentResult = false;
             }
 
